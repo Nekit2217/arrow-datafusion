@@ -61,25 +61,55 @@ version = "39.0.0"
 # for the inherited dependency but cannot do the reverse (override from true to false).
 #
 # See for more detaiils: https://github.com/rust-lang/cargo/issues/11329
+arrow = { git="https://github.com/Nekit2217/arrow-rs", branch="bm-master", features = [
+    "prettyprint",
+] }
+arrow-array = { git="https://github.com/Nekit2217/arrow-rs", branch="bm-master", default-features = false, features = [
+    "chrono-tz",
+] }
+arrow-buffer = { git="https://github.com/Nekit2217/arrow-rs", branch="bm-master", default-features = false }
+arrow-flight = { git="https://github.com/Nekit2217/arrow-rs", branch="bm-master", features = [
+    "flight-sql-experimental",
+] }
+arrow-ipc = { git="https://github.com/Nekit2217/arrow-rs", branch="bm-master", default-features = false, features = [
+    "lz4",
+] }
+arrow-ord = { git="https://github.com/Nekit2217/arrow-rs", branch="bm-master", default-features = false }
+arrow-schema = { git="https://github.com/Nekit2217/arrow-rs", branch="bm-master", default-features = false }
+arrow-string = { git="https://github.com/Nekit2217/arrow-rs", branch="bm-master", default-features = false }
+object_store = { git="https://github.com/Nekit2217/arrow-rs", branch="bm-master", default-features = false }
+parquet = { git="https://github.com/Nekit2217/arrow-rs", branch="bm-master", default-features = false, features = [
+    "arrow",
+    "async",
+    "object_store",
+] }
+
+#arrow = { path = "../../y_collateral/arrow-rs/arrow", features = [
+#    "prettyprint",
+#] }
+#arrow-array = { path = "../../y_collateral/arrow-rs/arrow-array", default-features = false, features = [
+#    "chrono-tz",
+#] }
+#arrow-buffer = { path = "../../y_collateral/arrow-rs/arrow-buffer", default-features = false }
+#arrow-flight = { path = "../../y_collateral/arrow-rs/arrow-flight", features = [
+#    "flight-sql-experimental",
+#] }
+#arrow-ipc = { path = "../../y_collateral/arrow-rs/arrow-ipc", default-features = false, features = [
+#    "lz4",
+#] }
+#arrow-ord = { path = "../../y_collateral/arrow-rs/arrow-ord", default-features = false }
+#arrow-schema = { path = "../../y_collateral/arrow-rs/arrow-schema", default-features = false }
+#arrow-string = { path = "../../y_collateral/arrow-rs/arrow-string", default-features = false }
+#object_store = { path = "../../y_collateral/arrow-rs/object_store", default-features = false }
+#parquet = { path = "../../y_collateral/arrow-rs/parquet", default-features = false, features = [
+#    "arrow",
+#    "async",
+#    "object_store",
+#] }
+
 ahash = { version = "0.8", default-features = false, features = [
     "runtime-rng",
 ] }
-arrow = { version = "52.0.0", features = [
-    "prettyprint",
-] }
-arrow-array = { version = "52.0.0", default-features = false, features = [
-    "chrono-tz",
-] }
-arrow-buffer = { version = "52.0.0", default-features = false }
-arrow-flight = { version = "52.0.0", features = [
-    "flight-sql-experimental",
-] }
-arrow-ipc = { version = "52.0.0", default-features = false, features = [
-    "lz4",
-] }
-arrow-ord = { version = "52.0.0", default-features = false }
-arrow-schema = { version = "52.0.0", default-features = false }
-arrow-string = { version = "52.0.0", default-features = false }
 async-trait = "0.1.73"
 bigdecimal = "=0.4.1"
 bytes = "1.4"
@@ -112,13 +142,8 @@ indexmap = "2.0.0"
 itertools = "0.12"
 log = "^0.4"
 num_cpus = "1.13.0"
-object_store = { version = "0.10.1", default-features = false }
 parking_lot = "0.12"
-parquet = { version = "52.0.0", default-features = false, features = [
-    "arrow",
-    "async",
-    "object_store",
-] }
+
 rand = "0.8"
 regex = "1.8"
 rstest = "0.21.0"
