@@ -15,11 +15,12 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use std::sync::Arc;
 use std::vec;
 
 use arrow_schema::*;
 use datafusion_common::{DFSchema, Result, TableReference};
-use datafusion_expr::test::function_stub::{count_udaf, sum_udaf};
+use datafusion_expr::test::function_stub::{count_udaf, max_udaf, min_udaf, sum_udaf};
 use datafusion_expr::{col, table_scan};
 use datafusion_sql::planner::{ContextProvider, PlannerContext, SqlToRel};
 use datafusion_sql::unparser::dialect::{
@@ -28,6 +29,7 @@ use datafusion_sql::unparser::dialect::{
 };
 use datafusion_sql::unparser::{expr_to_sql, plan_to_sql, Unparser};
 
+use datafusion_functions::core::planner::CoreFunctionPlanner;
 use sqlparser::dialect::{Dialect, GenericDialect, MySqlDialect};
 use sqlparser::parser::Parser;
 
@@ -82,6 +84,7 @@ fn roundtrip_statement() -> Result<()> {
             "select 1;",
             "select 1 limit 0;",
             "select ta.j1_id from j1 ta join (select 1 as j1_id) tb on ta.j1_id = tb.j1_id;",
+            "select ta.j1_id from j1 ta join (select 1 as j1_id) tb using (j1_id);",
             "select ta.j1_id from j1 ta join (select 1 as j1_id) tb on ta.j1_id = tb.j1_id where ta.j1_id > 1;",
             "select ta.j1_id from (select 1 as j1_id) ta;",
             "select ta.j1_id from j1 ta;",
@@ -104,26 +107,26 @@ fn roundtrip_statement() -> Result<()> {
             "select id, count(*) as cnt from (select p1.id as id from person p1 inner join person p2 on p1.id=p2.id) group by id",
             "select id, count(*), first_name from person group by first_name, id",
             "select id, sum(age), first_name from person group by first_name, id",
-            "select id, count(*), first_name 
-            from person 
+            "select id, count(*), first_name
+            from person
             where id!=3 and first_name=='test'
-            group by first_name, id 
+            group by first_name, id
             having count(*)>5 and count(*)<10
             order by count(*)",
-            r#"select id, count("First Name") as count_first_name, "Last Name" 
+            r#"select id, count("First Name") as count_first_name, "Last Name"
             from person_quoted_cols
             where id!=3 and "First Name"=='test'
-            group by "Last Name", id 
+            group by "Last Name", id
             having count_first_name>5 and count_first_name<10
             order by count_first_name, "Last Name""#,
             r#"select p.id, count("First Name") as count_first_name,
-            "Last Name", sum(qp.id/p.id - (select sum(id) from person_quoted_cols) ) / (select count(*) from person) 
+            "Last Name", sum(qp.id/p.id - (select sum(id) from person_quoted_cols) ) / (select count(*) from person)
             from (select id, "First Name", "Last Name" from person_quoted_cols) qp
             inner join (select * from person) p
             on p.id = qp.id
-            where p.id!=3 and "First Name"=='test' and qp.id in 
+            where p.id!=3 and "First Name"=='test' and qp.id in
             (select id from (select id, count(*) from person group by id having count(*) > 0))
-            group by "Last Name", p.id 
+            group by "Last Name", p.id
             having count_first_name>5 and count_first_name<10
             order by count_first_name, "Last Name""#,
             r#"SELECT j1_string as string FROM j1
@@ -134,12 +137,13 @@ fn roundtrip_statement() -> Result<()> {
             SELECT j2_string as string FROM j2
             ORDER BY string DESC
             LIMIT 10"#,
-            "SELECT id, count(*) over (PARTITION BY first_name ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING), 
-            last_name, sum(id) over (PARTITION BY first_name ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING), 
+            "SELECT id, count(*) over (PARTITION BY first_name ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING),
+            last_name, sum(id) over (PARTITION BY first_name ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING),
             first_name from person",
-            r#"SELECT id, count(distinct id) over (ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING), 
+            r#"SELECT id, count(distinct id) over (ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING),
             sum(id) OVER (PARTITION BY first_name ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) from person"#,
-            "SELECT id, sum(id) OVER (PARTITION BY first_name ROWS BETWEEN 5 PRECEDING AND 2 FOLLOWING) from person",            
+            "SELECT id, sum(id) OVER (PARTITION BY first_name ROWS BETWEEN 5 PRECEDING AND 2 FOLLOWING) from person",
+            "WITH t1 AS (SELECT j1_id AS id, j1_string name FROM j1), t2 AS (SELECT j2_id AS id, j2_string name FROM j2) SELECT * FROM t1 JOIN t2 USING (id, name)",
         ];
 
     // For each test sql string, we transform as follows:
@@ -155,7 +159,8 @@ fn roundtrip_statement() -> Result<()> {
 
         let context = MockContextProvider::default()
             .with_udaf(sum_udaf())
-            .with_udaf(count_udaf());
+            .with_udaf(count_udaf())
+            .with_expr_planner(Arc::new(CoreFunctionPlanner::default()));
         let sql_to_rel = SqlToRel::new(&context);
         let plan = sql_to_rel.sql_statement_to_plan(statement).unwrap();
 
@@ -184,7 +189,8 @@ fn roundtrip_crossjoin() -> Result<()> {
         .try_with_sql(query)?
         .parse_statement()?;
 
-    let context = MockContextProvider::default();
+    let context = MockContextProvider::default()
+        .with_expr_planner(Arc::new(CoreFunctionPlanner::default()));
     let sql_to_rel = SqlToRel::new(&context);
     let plan = sql_to_rel.sql_statement_to_plan(statement).unwrap();
 
@@ -203,7 +209,7 @@ fn roundtrip_crossjoin() -> Result<()> {
         \n    TableScan: j1\
         \n    TableScan: j2";
 
-    assert_eq!(format!("{plan_roundtrip:?}"), expected);
+    assert_eq!(format!("{plan_roundtrip}"), expected);
 
     Ok(())
 }
@@ -240,6 +246,133 @@ fn roundtrip_statement_with_dialect() -> Result<()> {
             parser_dialect: Box::new(GenericDialect {}),
             unparser_dialect: Box::new(UnparserDefaultDialect {}),
         },
+        // Test query with derived tables that put distinct,sort,limit on the wrong level
+        TestStatementWithDialect {
+            sql: "SELECT j1_string from j1 order by j1_id",
+            expected: r#"SELECT j1.j1_string FROM j1 ORDER BY j1.j1_id ASC NULLS LAST"#,
+            parser_dialect: Box::new(GenericDialect {}),
+            unparser_dialect: Box::new(UnparserDefaultDialect {}),
+        },
+        TestStatementWithDialect {
+            sql: "SELECT j1_string AS a from j1 order by j1_id",
+            expected: r#"SELECT j1.j1_string AS a FROM j1 ORDER BY j1.j1_id ASC NULLS LAST"#,
+            parser_dialect: Box::new(GenericDialect {}),
+            unparser_dialect: Box::new(UnparserDefaultDialect {}),
+        },
+        TestStatementWithDialect {
+            sql: "SELECT j1_string from j1 join j2 on j1.j1_id = j2.j2_id order by j1_id",
+            expected: r#"SELECT j1.j1_string FROM j1 JOIN j2 ON (j1.j1_id = j2.j2_id) ORDER BY j1.j1_id ASC NULLS LAST"#,
+            parser_dialect: Box::new(GenericDialect {}),
+            unparser_dialect: Box::new(UnparserDefaultDialect {}),
+        },
+        TestStatementWithDialect {
+            sql: "
+                SELECT
+                  j1_string,
+                  j2_string
+                FROM
+                  (
+                    SELECT
+                      distinct j1_id,
+                      j1_string,
+                      j2_string
+                    from
+                      j1
+                      INNER join j2 ON j1.j1_id = j2.j2_id
+                    order by
+                      j1.j1_id desc
+                    limit
+                      10
+                  ) abc
+                ORDER BY
+                  abc.j2_string",
+            expected: r#"SELECT abc.j1_string, abc.j2_string FROM (SELECT DISTINCT j1.j1_id, j1.j1_string, j2.j2_string FROM j1 JOIN j2 ON (j1.j1_id = j2.j2_id) ORDER BY j1.j1_id DESC NULLS FIRST LIMIT 10) AS abc ORDER BY abc.j2_string ASC NULLS LAST"#,
+            parser_dialect: Box::new(GenericDialect {}),
+            unparser_dialect: Box::new(UnparserDefaultDialect {}),
+        },
+        // more tests around subquery/derived table roundtrip
+        TestStatementWithDialect {
+            sql: "SELECT string_count FROM (
+                    SELECT
+                        j1_id,
+                        min(j2_string)
+                    FROM
+                        j1 LEFT OUTER JOIN j2 ON
+                                    j1_id = j2_id
+                    GROUP BY
+                        j1_id
+                ) AS agg (id, string_count)
+            ",
+            expected: r#"SELECT agg.string_count FROM (SELECT j1.j1_id, min(j2.j2_string) FROM j1 LEFT JOIN j2 ON (j1.j1_id = j2.j2_id) GROUP BY j1.j1_id) AS agg (id, string_count)"#,
+            parser_dialect: Box::new(GenericDialect {}),
+            unparser_dialect: Box::new(UnparserDefaultDialect {}),
+        },
+        TestStatementWithDialect {
+            sql: "
+                SELECT
+                  j1_string,
+                  j2_string
+                FROM
+                  (
+                    SELECT
+                      j1_id,
+                      j1_string,
+                      j2_string
+                    from
+                      j1
+                      INNER join j2 ON j1.j1_id = j2.j2_id
+                    group by
+                      j1_id,
+                      j1_string,
+                      j2_string
+                    order by
+                      j1.j1_id desc
+                    limit
+                      10
+                  ) abc
+                ORDER BY
+                  abc.j2_string",
+            expected: r#"SELECT abc.j1_string, abc.j2_string FROM (SELECT j1.j1_id, j1.j1_string, j2.j2_string FROM j1 JOIN j2 ON (j1.j1_id = j2.j2_id) GROUP BY j1.j1_id, j1.j1_string, j2.j2_string ORDER BY j1.j1_id DESC NULLS FIRST LIMIT 10) AS abc ORDER BY abc.j2_string ASC NULLS LAST"#,
+            parser_dialect: Box::new(GenericDialect {}),
+            unparser_dialect: Box::new(UnparserDefaultDialect {}),
+        },
+        // Test query that order by columns are not in select columns
+        TestStatementWithDialect {
+            sql: "
+                SELECT
+                  j1_string
+                FROM
+                  (
+                    SELECT
+                      j1_string,
+                      j2_string
+                    from
+                      j1
+                      INNER join j2 ON j1.j1_id = j2.j2_id
+                    order by
+                      j1.j1_id desc,
+                      j2.j2_id desc
+                    limit
+                      10
+                  ) abc
+                ORDER BY
+                  j2_string",
+            expected: r#"SELECT abc.j1_string FROM (SELECT j1.j1_string, j2.j2_string FROM j1 JOIN j2 ON (j1.j1_id = j2.j2_id) ORDER BY j1.j1_id DESC NULLS FIRST, j2.j2_id DESC NULLS FIRST LIMIT 10) AS abc ORDER BY abc.j2_string ASC NULLS LAST"#,
+            parser_dialect: Box::new(GenericDialect {}),
+            unparser_dialect: Box::new(UnparserDefaultDialect {}),
+        },
+        TestStatementWithDialect {
+            sql: "SELECT id FROM (SELECT j1_id from j1) AS c (id)",
+            expected: r#"SELECT c.id FROM (SELECT j1.j1_id FROM j1) AS c (id)"#,
+            parser_dialect: Box::new(GenericDialect {}),
+            unparser_dialect: Box::new(UnparserDefaultDialect {}),
+        },
+        TestStatementWithDialect {
+            sql: "SELECT id FROM (SELECT j1_id as id from j1) AS c",
+            expected: r#"SELECT c.id FROM (SELECT j1.j1_id AS id FROM j1) AS c"#,
+            parser_dialect: Box::new(GenericDialect {}),
+            unparser_dialect: Box::new(UnparserDefaultDialect {}),
+        },
     ];
 
     for query in tests {
@@ -247,7 +380,10 @@ fn roundtrip_statement_with_dialect() -> Result<()> {
             .try_with_sql(query.sql)?
             .parse_statement()?;
 
-        let context = MockContextProvider::default();
+        let context = MockContextProvider::default()
+            .with_expr_planner(Arc::new(CoreFunctionPlanner::default()))
+            .with_udaf(max_udaf())
+            .with_udaf(min_udaf());
         let sql_to_rel = SqlToRel::new(&context);
         let plan = sql_to_rel
             .sql_statement_to_plan(statement)
@@ -284,7 +420,7 @@ fn test_unnest_logical_plan() -> Result<()> {
         \n    Projection: unnest_table.struct_col AS unnest(unnest_table.struct_col), unnest_table.array_col AS unnest(unnest_table.array_col), unnest_table.struct_col, unnest_table.array_col\
         \n      TableScan: unnest_table";
 
-    assert_eq!(format!("{plan:?}"), expected);
+    assert_eq!(format!("{plan}"), expected);
 
     Ok(())
 }
@@ -312,5 +448,135 @@ fn test_table_references_in_plan_to_sql() {
     test(
         "table",
         "SELECT \"table\".id, \"table\".\"value\" FROM \"table\"",
+    );
+}
+
+#[test]
+fn test_table_scan_with_no_projection_in_plan_to_sql() {
+    fn test(table_name: &str, expected_sql: &str) {
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("value", DataType::Utf8, false),
+        ]);
+
+        let plan = table_scan(Some(table_name), &schema, None)
+            .unwrap()
+            .build()
+            .unwrap();
+        let sql = plan_to_sql(&plan).unwrap();
+        assert_eq!(format!("{}", sql), expected_sql)
+    }
+
+    test(
+        "catalog.schema.table",
+        "SELECT * FROM catalog.\"schema\".\"table\"",
+    );
+    test("schema.table", "SELECT * FROM \"schema\".\"table\"");
+    test("table", "SELECT * FROM \"table\"");
+}
+
+#[test]
+fn test_pretty_roundtrip() -> Result<()> {
+    let schema = Schema::new(vec![
+        Field::new("id", DataType::Utf8, false),
+        Field::new("age", DataType::Utf8, false),
+    ]);
+
+    let df_schema = DFSchema::try_from(schema)?;
+
+    let context = MockContextProvider::default();
+    let sql_to_rel = SqlToRel::new(&context);
+
+    let unparser = Unparser::default().with_pretty(true);
+
+    let sql_to_pretty_unparse = vec![
+        ("((id < 5) OR (age = 8))", "id < 5 OR age = 8"),
+        ("((id + 5) * (age * 8))", "(id + 5) * age * 8"),
+        ("(3 + (5 * 6) * 3)", "3 + 5 * 6 * 3"),
+        ("((3 * (5 + 6)) * 3)", "3 * (5 + 6) * 3"),
+        ("((3 AND (5 OR 6)) * 3)", "(3 AND (5 OR 6)) * 3"),
+        ("((3 + (5 + 6)) * 3)", "(3 + 5 + 6) * 3"),
+        ("((3 + (5 + 6)) + 3)", "3 + 5 + 6 + 3"),
+        ("3 + 5 + 6 + 3", "3 + 5 + 6 + 3"),
+        ("3 + (5 + (6 + 3))", "3 + 5 + 6 + 3"),
+        ("3 + ((5 + 6) + 3)", "3 + 5 + 6 + 3"),
+        ("(3 + 5) + (6 + 3)", "3 + 5 + 6 + 3"),
+        ("((3 + 5) + (6 + 3))", "3 + 5 + 6 + 3"),
+        (
+            "((id > 10) OR (age BETWEEN 10 AND 20))",
+            "id > 10 OR age BETWEEN 10 AND 20",
+        ),
+        (
+            "((id > 10) * (age BETWEEN 10 AND 20))",
+            "(id > 10) * (age BETWEEN 10 AND 20)",
+        ),
+        ("id - (age - 8)", "id - (age - 8)"),
+        ("((id - age) - 8)", "id - age - 8"),
+        ("(id OR (age - 8))", "id OR age - 8"),
+        ("(id / (age - 8))", "id / (age - 8)"),
+        ("((id / age) * 8)", "id / age * 8"),
+        ("((age + 10) < 20) IS TRUE", "(age + 10 < 20) IS TRUE"),
+        (
+            "(20 > (age + 5)) IS NOT FALSE",
+            "(20 > age + 5) IS NOT FALSE",
+        ),
+        ("(true AND false) IS FALSE", "(true AND false) IS FALSE"),
+        ("true AND (false IS FALSE)", "true AND false IS FALSE"),
+    ];
+
+    for (sql, pretty) in sql_to_pretty_unparse.iter() {
+        let sql_expr = Parser::new(&GenericDialect {})
+            .try_with_sql(sql)?
+            .parse_expr()?;
+        let expr =
+            sql_to_rel.sql_to_expr(sql_expr, &df_schema, &mut PlannerContext::new())?;
+        let round_trip_sql = unparser.expr_to_sql(&expr)?.to_string();
+        assert_eq!(pretty.to_string(), round_trip_sql);
+
+        // verify that the pretty string parses to the same underlying Expr
+        let pretty_sql_expr = Parser::new(&GenericDialect {})
+            .try_with_sql(pretty)?
+            .parse_expr()?;
+
+        let pretty_expr = sql_to_rel.sql_to_expr(
+            pretty_sql_expr,
+            &df_schema,
+            &mut PlannerContext::new(),
+        )?;
+
+        assert_eq!(expr.to_string(), pretty_expr.to_string());
+    }
+
+    Ok(())
+}
+
+fn sql_round_trip(query: &str, expect: &str) {
+    let statement = Parser::new(&GenericDialect {})
+        .try_with_sql(query)
+        .unwrap()
+        .parse_statement()
+        .unwrap();
+
+    let context = MockContextProvider::default();
+    let sql_to_rel = SqlToRel::new(&context);
+    let plan = sql_to_rel.sql_statement_to_plan(statement).unwrap();
+
+    let roundtrip_statement = plan_to_sql(&plan).unwrap();
+    assert_eq!(roundtrip_statement.to_string(), expect);
+}
+
+#[test]
+fn test_interval_lhs_eq() {
+    sql_round_trip(
+        "select interval '2 seconds' = interval '2 seconds'",
+        "SELECT (INTERVAL '0 YEARS 0 MONS 0 DAYS 0 HOURS 0 MINS 2.000000000 SECS' = INTERVAL '0 YEARS 0 MONS 0 DAYS 0 HOURS 0 MINS 2.000000000 SECS')",
+    );
+}
+
+#[test]
+fn test_interval_lhs_lt() {
+    sql_round_trip(
+        "select interval '2 seconds' < interval '2 seconds'",
+        "SELECT (INTERVAL '0 YEARS 0 MONS 0 DAYS 0 HOURS 0 MINS 2.000000000 SECS' < INTERVAL '0 YEARS 0 MONS 0 DAYS 0 HOURS 0 MINS 2.000000000 SECS')",
     );
 }

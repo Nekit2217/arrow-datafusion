@@ -176,6 +176,7 @@ fn pushdown_requirement_to_children(
         || plan.as_any().is::<ProjectionExec>()
         || is_limit(plan)
         || plan.as_any().is::<HashJoinExec>()
+        || pushdown_would_violate_requirements(parent_required, plan.as_ref())
     {
         // If the current plan is a leaf node or can not maintain any of the input ordering, can not pushed down requirements.
         // For RepartitionExec, we always choose to not push down the sort requirements even the RepartitionExec(input_partition=1) could maintain input ordering.
@@ -209,6 +210,29 @@ fn pushdown_requirement_to_children(
         ))
     }
     // TODO: Add support for Projection push down
+}
+
+/// Return true if pushing the sort requirements through a node would violate
+/// the input sorting requirements for the plan
+fn pushdown_would_violate_requirements(
+    parent_required: LexRequirementRef,
+    child: &dyn ExecutionPlan,
+) -> bool {
+    child
+        .required_input_ordering()
+        .iter()
+        .any(|child_required| {
+            let Some(child_required) = child_required.as_ref() else {
+                // no requirements, so pushing down would not violate anything
+                return false;
+            };
+            // check if the plan's requirements would still e satisfied if we pushed
+            // down the parent requirements
+            child_required
+                .iter()
+                .zip(parent_required.iter())
+                .all(|(c, p)| !c.compatible(p))
+        })
 }
 
 /// Determine children requirements:
@@ -245,11 +269,38 @@ fn try_pushdown_requirements_to_join(
     sort_expr: Vec<PhysicalSortExpr>,
     push_side: JoinSide,
 ) -> Result<Option<Vec<Option<Vec<PhysicalSortRequirement>>>>> {
+    let left_eq_properties = smj.left().equivalence_properties();
+    let right_eq_properties = smj.right().equivalence_properties();
+    let mut smj_required_orderings = smj.required_input_ordering();
+    let right_requirement = smj_required_orderings.swap_remove(1);
+    let left_requirement = smj_required_orderings.swap_remove(0);
     let left_ordering = smj.left().output_ordering().unwrap_or(&[]);
     let right_ordering = smj.right().output_ordering().unwrap_or(&[]);
     let (new_left_ordering, new_right_ordering) = match push_side {
-        JoinSide::Left => (sort_expr.as_slice(), right_ordering),
-        JoinSide::Right => (left_ordering, sort_expr.as_slice()),
+        JoinSide::Left => {
+            let left_eq_properties =
+                left_eq_properties.clone().with_reorder(sort_expr.clone());
+            if left_eq_properties
+                .ordering_satisfy_requirement(&left_requirement.unwrap_or_default())
+            {
+                // After re-ordering requirement is still satisfied
+                (sort_expr.as_slice(), right_ordering)
+            } else {
+                return Ok(None);
+            }
+        }
+        JoinSide::Right => {
+            let right_eq_properties =
+                right_eq_properties.clone().with_reorder(sort_expr.clone());
+            if right_eq_properties
+                .ordering_satisfy_requirement(&right_requirement.unwrap_or_default())
+            {
+                // After re-ordering requirement is still satisfied
+                (left_ordering, sort_expr.as_slice())
+            } else {
+                return Ok(None);
+            }
+        }
     };
     let join_type = smj.join_type();
     let probe_side = SortMergeJoinExec::probe_side(&join_type);

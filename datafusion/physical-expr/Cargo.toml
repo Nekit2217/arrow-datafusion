@@ -77,3 +77,11 @@ tokio = { workspace = true, features = ["rt-multi-thread"] }
 [[bench]]
 harness = false
 name = "in_list"
+
+[[bench]]
+harness = false
+name = "case_when"
+
+[[bench]]
+harness = false
+name = "is_null"

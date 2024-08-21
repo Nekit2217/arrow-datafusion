@@ -19,7 +19,8 @@ use std::any::Any;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
-use arrow::array::RecordBatch;
+use arrow::array::{Array, RecordBatch};
+use arrow::compute::{filter, is_not_null};
 use arrow::{
     array::{
         ArrayRef, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array,
@@ -30,7 +31,8 @@ use arrow::{
 use arrow_schema::{Field, Schema};
 
 use datafusion_common::{
-    downcast_value, internal_err, not_impl_err, plan_err, DataFusionError, ScalarValue,
+    downcast_value, internal_err, not_impl_err, plan_err, DFSchema, DataFusionError,
+    ScalarValue,
 };
 use datafusion_expr::function::{AccumulatorArgs, StateFieldsArgs};
 use datafusion_expr::type_coercion::aggregates::{INTEGERS, NUMERICS};
@@ -42,7 +44,7 @@ use datafusion_expr::{
 use datafusion_physical_expr_common::aggregate::tdigest::{
     TDigest, TryIntoF64, DEFAULT_MAX_SIZE,
 };
-use datafusion_physical_expr_common::utils::limited_convert_logical_expr_to_physical_expr;
+use datafusion_physical_expr_common::utils::limited_convert_logical_expr_to_physical_expr_with_dfschema;
 
 make_udaf_expr_and_func!(
     ApproxPercentileCont,
@@ -103,7 +105,7 @@ impl ApproxPercentileCont {
             None
         };
 
-        let accumulator: ApproxPercentileAccumulator = match args.input_type {
+        let accumulator: ApproxPercentileAccumulator = match &args.input_types[0] {
             t @ (DataType::UInt8
             | DataType::UInt16
             | DataType::UInt32
@@ -135,7 +137,9 @@ impl ApproxPercentileCont {
 fn get_lit_value(expr: &Expr) -> datafusion_common::Result<ScalarValue> {
     let empty_schema = Arc::new(Schema::empty());
     let empty_batch = RecordBatch::new_empty(Arc::clone(&empty_schema));
-    let expr = limited_convert_logical_expr_to_physical_expr(expr, &empty_schema)?;
+    let dfschema = DFSchema::empty();
+    let expr =
+        limited_convert_logical_expr_to_physical_expr_with_dfschema(expr, &dfschema)?;
     let result = expr.evaluate(&empty_batch)?;
     match result {
         ColumnarValue::Array(_) => Err(DataFusionError::Internal(format!(
@@ -191,7 +195,7 @@ impl AggregateUDFImpl for ApproxPercentileCont {
     }
 
     #[allow(rustdoc::private_intra_doc_links)]
-    /// See [`datafusion_physical_expr_common::aggregate::tdigest::TDigest::to_scalar_state()`] for a description of the serialised
+    /// See [`TDigest::to_scalar_state()`] for a description of the serialised
     /// state.
     fn state_fields(
         &self,
@@ -210,7 +214,7 @@ impl AggregateUDFImpl for ApproxPercentileCont {
             ),
             Field::new(
                 format_state_name(args.name, "count"),
-                DataType::Float64,
+                DataType::UInt64,
                 false,
             ),
             Field::new(
@@ -390,15 +394,19 @@ impl Accumulator for ApproxPercentileAccumulator {
     }
 
     fn update_batch(&mut self, values: &[ArrayRef]) -> datafusion_common::Result<()> {
-        let values = &values[0];
-        let sorted_values = &arrow::compute::sort(values, None)?;
+        // Remove any nulls before computing the percentile
+        let mut values = Arc::clone(&values[0]);
+        if values.nulls().is_some() {
+            values = filter(&values, &is_not_null(&values)?)?;
+        }
+        let sorted_values = &arrow::compute::sort(&values, None)?;
         let sorted_values = ApproxPercentileAccumulator::convert_to_float(sorted_values)?;
         self.digest = self.digest.merge_sorted_f64(&sorted_values);
         Ok(())
     }
 
     fn evaluate(&mut self) -> datafusion_common::Result<ScalarValue> {
-        if self.digest.count() == 0.0 {
+        if self.digest.count() == 0 {
             return ScalarValue::try_from(self.return_type.clone());
         }
         let q = self.digest.estimate_quantile(self.percentile);
@@ -479,8 +487,8 @@ mod tests {
             ApproxPercentileAccumulator::new_with_max_size(0.5, DataType::Float64, 100);
 
         accumulator.merge_digests(&[t1]);
-        assert_eq!(accumulator.digest.count(), 50_000.0);
+        assert_eq!(accumulator.digest.count(), 50_000);
         accumulator.merge_digests(&[t2]);
-        assert_eq!(accumulator.digest.count(), 100_000.0);
+        assert_eq!(accumulator.digest.count(), 100_000);
     }
 }

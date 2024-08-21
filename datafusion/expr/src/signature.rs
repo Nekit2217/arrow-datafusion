@@ -65,7 +65,7 @@ pub enum Volatility {
 /// automatically coerces (add casts to) function arguments so they match the type signature.
 ///
 /// For example, a function like `cos` may only be implemented for `Float64` arguments. To support a query
-/// that calles `cos` with a different argument type, such as `cos(int_column)`, type coercion automatically
+/// that calls `cos` with a different argument type, such as `cos(int_column)`, type coercion automatically
 /// adds a cast such as `cos(CAST int_column AS DOUBLE)` during planning.
 ///
 /// # Data Types
@@ -93,7 +93,7 @@ pub enum TypeSignature {
     Variadic(Vec<DataType>),
     /// The acceptable signature and coercions rules to coerce arguments to this
     /// signature are special for this function. If this signature is specified,
-    /// Datafusion will call [`ScalarUDFImpl::coerce_types`] to prepare argument types.
+    /// DataFusion will call [`ScalarUDFImpl::coerce_types`] to prepare argument types.
     ///
     /// [`ScalarUDFImpl::coerce_types`]: crate::udf::ScalarUDFImpl::coerce_types
     UserDefined,
@@ -145,6 +145,9 @@ pub enum ArrayFunctionSignature {
     /// The function takes a single argument that must be a List/LargeList/FixedSizeList
     /// or something that can be coerced to one of those types.
     Array,
+    /// Specialized Signature for MapArray
+    /// The function takes a single argument that must be a MapArray
+    MapArray,
 }
 
 impl std::fmt::Display for ArrayFunctionSignature {
@@ -164,6 +167,9 @@ impl std::fmt::Display for ArrayFunctionSignature {
             }
             ArrayFunctionSignature::Array => {
                 write!(f, "array")
+            }
+            ArrayFunctionSignature::MapArray => {
+                write!(f, "map_array")
             }
         }
     }
@@ -266,9 +272,10 @@ impl Signature {
         }
     }
 
-    pub fn numeric(num: usize, volatility: Volatility) -> Self {
+    /// A specified number of numeric arguments
+    pub fn numeric(arg_count: usize, volatility: Volatility) -> Self {
         Self {
-            type_signature: TypeSignature::Numeric(num),
+            type_signature: TypeSignature::Numeric(arg_count),
             volatility,
         }
     }

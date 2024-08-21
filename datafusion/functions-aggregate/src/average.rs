@@ -93,7 +93,7 @@ impl AggregateUDFImpl for Avg {
         }
         use DataType::*;
         // instantiate specialized accumulator based for the type
-        match (acc_args.input_type, acc_args.data_type) {
+        match (&acc_args.input_types[0], acc_args.data_type) {
             (Float64, Float64) => Ok(Box::<AvgAccumulator>::default()),
             (
                 Decimal128(sum_precision, sum_scale),
@@ -120,7 +120,7 @@ impl AggregateUDFImpl for Avg {
             })),
             _ => exec_err!(
                 "AvgAccumulator for ({} --> {})",
-                acc_args.input_type,
+                &acc_args.input_types[0],
                 acc_args.data_type
             ),
         }
@@ -135,7 +135,7 @@ impl AggregateUDFImpl for Avg {
             ),
             Field::new(
                 format_state_name(args.name, "sum"),
-                args.input_type.clone(),
+                args.input_types[0].clone(),
                 true,
             ),
         ])
@@ -154,10 +154,10 @@ impl AggregateUDFImpl for Avg {
     ) -> Result<Box<dyn GroupsAccumulator>> {
         use DataType::*;
         // instantiate specialized accumulator based for the type
-        match (args.input_type, args.data_type) {
+        match (&args.input_types[0], args.data_type) {
             (Float64, Float64) => {
                 Ok(Box::new(AvgGroupsAccumulator::<Float64Type, _>::new(
-                    args.input_type,
+                    &args.input_types[0],
                     args.data_type,
                     |sum: f64, count: u64| Ok(sum / count as f64),
                 )))
@@ -176,7 +176,7 @@ impl AggregateUDFImpl for Avg {
                     move |sum: i128, count: u64| decimal_averager.avg(sum, count as i128);
 
                 Ok(Box::new(AvgGroupsAccumulator::<Decimal128Type, _>::new(
-                    args.input_type,
+                    &args.input_types[0],
                     args.data_type,
                     avg_fn,
                 )))
@@ -197,7 +197,7 @@ impl AggregateUDFImpl for Avg {
                 };
 
                 Ok(Box::new(AvgGroupsAccumulator::<Decimal256Type, _>::new(
-                    args.input_type,
+                    &args.input_types[0],
                     args.data_type,
                     avg_fn,
                 )))
@@ -205,7 +205,7 @@ impl AggregateUDFImpl for Avg {
 
             _ => not_impl_err!(
                 "AvgGroupsAccumulator for ({} --> {})",
-                args.input_type,
+                &args.input_types[0],
                 args.data_type
             ),
         }
@@ -213,13 +213,6 @@ impl AggregateUDFImpl for Avg {
 
     fn aliases(&self) -> &[String] {
         &self.aliases
-    }
-
-    fn create_sliding_accumulator(
-        &self,
-        args: AccumulatorArgs,
-    ) -> Result<Box<dyn Accumulator>> {
-        self.accumulator(args)
     }
 
     fn reverse_expr(&self) -> ReversedUDAF {
@@ -489,7 +482,7 @@ where
                 .into_iter()
                 .zip(counts.into_iter())
                 .map(|(sum, count)| (self.avg_fn)(sum, count))
-                .collect::<datafusion_common::Result<Vec<_>>>()?;
+                .collect::<Result<Vec<_>>>()?;
             PrimitiveArray::new(averages.into(), Some(nulls)) // no copy
                 .with_data_type(self.return_data_type.clone())
         };
