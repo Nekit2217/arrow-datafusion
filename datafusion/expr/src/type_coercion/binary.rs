@@ -28,7 +28,6 @@ use arrow::datatypes::{
     DataType, Field, TimeUnit, DECIMAL128_MAX_PRECISION, DECIMAL128_MAX_SCALE,
     DECIMAL256_MAX_PRECISION, DECIMAL256_MAX_SCALE,
 };
-
 use datafusion_common::{exec_datafusion_err, plan_datafusion_err, plan_err, Result};
 
 /// The type signature of an instantiation of binary operator expression such as
@@ -155,7 +154,7 @@ fn signature(lhs: &DataType, op: &Operator, rhs: &DataType) -> Result<Signature>
                     rhs: rhs.clone(),
                     ret,
                 })
-            } else if let Some(coerced) = temporal_coercion(lhs, rhs) {
+            } else if let Some(coerced) = temporal_coercion_strict_timezone(lhs, rhs) {
                 // Temporal arithmetic by first coercing to a common time representation
                 // e.g. Date32 - Timestamp
                 let ret = get_result(&coerced, &coerced).map_err(|e| {
@@ -370,7 +369,7 @@ impl From<&DataType> for TypeCategory {
 /// The rules in the document provide a clue, but adhering strictly to them doesn't precisely
 /// align with the behavior of Postgres. Therefore, we've made slight adjustments to the rules
 /// to better match the behavior of both Postgres and DuckDB. For example, we expect adjusted
-/// decimal percision and scale when coercing decimal types.
+/// decimal precision and scale when coercing decimal types.
 pub fn type_union_resolution(data_types: &[DataType]) -> Option<DataType> {
     if data_types.is_empty() {
         return None;
@@ -492,7 +491,7 @@ pub fn comparison_coercion(lhs_type: &DataType, rhs_type: &DataType) -> Option<D
     }
     binary_numeric_coercion(lhs_type, rhs_type)
         .or_else(|| dictionary_coercion(lhs_type, rhs_type, true))
-        .or_else(|| temporal_coercion(lhs_type, rhs_type))
+        .or_else(|| temporal_coercion_nonstrict_timezone(lhs_type, rhs_type))
         .or_else(|| string_coercion(lhs_type, rhs_type))
         .or_else(|| list_coercion(lhs_type, rhs_type))
         .or_else(|| null_coercion(lhs_type, rhs_type))
@@ -508,7 +507,7 @@ pub fn values_coercion(lhs_type: &DataType, rhs_type: &DataType) -> Option<DataT
         return Some(lhs_type.clone());
     }
     binary_numeric_coercion(lhs_type, rhs_type)
-        .or_else(|| temporal_coercion(lhs_type, rhs_type))
+        .or_else(|| temporal_coercion_nonstrict_timezone(lhs_type, rhs_type))
         .or_else(|| string_coercion(lhs_type, rhs_type))
         .or_else(|| binary_coercion(lhs_type, rhs_type))
 }
@@ -527,7 +526,7 @@ fn string_numeric_coercion(lhs_type: &DataType, rhs_type: &DataType) -> Option<D
 }
 
 /// Coerce `lhs_type` and `rhs_type` to a common type for the purposes of a comparison operation
-/// where one is temporal and one is `Utf8`/`LargeUtf8`.
+/// where one is temporal and one is `Utf8View`/`Utf8`/`LargeUtf8`.
 ///
 /// Note this cannot be performed in case of arithmetic as there is insufficient information
 /// to correctly determine the type of argument. Consider
@@ -547,19 +546,21 @@ fn string_temporal_coercion(
 
     fn match_rule(l: &DataType, r: &DataType) -> Option<DataType> {
         match (l, r) {
-            // Coerce Utf8/LargeUtf8 to Date32/Date64/Time32/Time64/Timestamp
-            (Utf8, temporal) | (LargeUtf8, temporal) => match temporal {
-                Date32 | Date64 => Some(temporal.clone()),
-                Time32(_) | Time64(_) => {
-                    if is_time_with_valid_unit(temporal.to_owned()) {
-                        Some(temporal.to_owned())
-                    } else {
-                        None
+            // Coerce Utf8View/Utf8/LargeUtf8 to Date32/Date64/Time32/Time64/Timestamp
+            (Utf8, temporal) | (LargeUtf8, temporal) | (Utf8View, temporal) => {
+                match temporal {
+                    Date32 | Date64 => Some(temporal.clone()),
+                    Time32(_) | Time64(_) => {
+                        if is_time_with_valid_unit(temporal.to_owned()) {
+                            Some(temporal.to_owned())
+                        } else {
+                            None
+                        }
                     }
+                    Timestamp(_, tz) => Some(Timestamp(TimeUnit::Nanosecond, tz.clone())),
+                    _ => None,
                 }
-                Timestamp(_, tz) => Some(Timestamp(TimeUnit::Nanosecond, tz.clone())),
-                _ => None,
-            },
+            }
             _ => None,
         }
     }
@@ -718,7 +719,7 @@ pub fn get_wider_type(lhs: &DataType, rhs: &DataType) -> Result<DataType> {
         (Int16 | Int32 | Int64, Int8) | (Int32 | Int64, Int16) | (Int64, Int32) |
         // Left Float is larger than right Float.
         (Float32 | Float64, Float16) | (Float64, Float32) |
-        // Left String is larget than right String.
+        // Left String is larger than right String.
         (LargeUtf8, Utf8) |
         // Any left type is wider than a right hand side Null.
         (_, Null) => lhs.clone(),
@@ -889,15 +890,22 @@ fn dictionary_coercion(
 /// 2. Data type of the other side should be able to cast to string type
 fn string_concat_coercion(lhs_type: &DataType, rhs_type: &DataType) -> Option<DataType> {
     use arrow::datatypes::DataType::*;
-    string_coercion(lhs_type, rhs_type).or(match (lhs_type, rhs_type) {
-        (Utf8, from_type) | (from_type, Utf8) => {
-            string_concat_internal_coercion(from_type, &Utf8)
+    match (lhs_type, rhs_type) {
+        // If Utf8View is in any side, we coerce to Utf8.
+        // Ref: https://github.com/apache/datafusion/pull/11796
+        (Utf8View, Utf8View | Utf8 | LargeUtf8) | (Utf8 | LargeUtf8, Utf8View) => {
+            Some(Utf8)
         }
-        (LargeUtf8, from_type) | (from_type, LargeUtf8) => {
-            string_concat_internal_coercion(from_type, &LargeUtf8)
-        }
-        _ => None,
-    })
+        _ => string_coercion(lhs_type, rhs_type).or(match (lhs_type, rhs_type) {
+            (Utf8, from_type) | (from_type, Utf8) => {
+                string_concat_internal_coercion(from_type, &Utf8)
+            }
+            (LargeUtf8, from_type) | (from_type, LargeUtf8) => {
+                string_concat_internal_coercion(from_type, &LargeUtf8)
+            }
+            _ => None,
+        }),
+    }
 }
 
 fn array_coercion(lhs_type: &DataType, rhs_type: &DataType) -> Option<DataType> {
@@ -919,16 +927,21 @@ fn string_concat_internal_coercion(
     }
 }
 
-/// Coercion rules for string types (Utf8/LargeUtf8): If at least one argument is
-/// a string type and both arguments can be coerced into a string type, coerce
-/// to string type.
+/// Coercion rules for string view types (Utf8/LargeUtf8/Utf8View):
+/// If at least one argument is a string view, we coerce to string view
+/// based on the observation that StringArray to StringViewArray is cheap but not vice versa.
+///
+/// Between Utf8 and LargeUtf8, we coerce to LargeUtf8.
 fn string_coercion(lhs_type: &DataType, rhs_type: &DataType) -> Option<DataType> {
     use arrow::datatypes::DataType::*;
     match (lhs_type, rhs_type) {
+        // If Utf8View is in any side, we coerce to Utf8View.
+        (Utf8View, Utf8View | Utf8 | LargeUtf8) | (Utf8 | LargeUtf8, Utf8View) => {
+            Some(Utf8View)
+        }
+        // Then, if LargeUtf8 is in any side, we coerce to LargeUtf8.
+        (LargeUtf8, Utf8 | LargeUtf8) | (Utf8, LargeUtf8) => Some(LargeUtf8),
         (Utf8, Utf8) => Some(Utf8),
-        (LargeUtf8, Utf8) => Some(LargeUtf8),
-        (Utf8, LargeUtf8) => Some(LargeUtf8),
-        (LargeUtf8, LargeUtf8) => Some(LargeUtf8),
         _ => None,
     }
 }
@@ -975,15 +988,26 @@ fn binary_to_string_coercion(
     }
 }
 
-/// Coercion rules for binary types (Binary/LargeBinary): If at least one argument is
+/// Coercion rules for binary types (Binary/LargeBinary/BinaryView): If at least one argument is
 /// a binary type and both arguments can be coerced into a binary type, coerce
 /// to binary type.
 fn binary_coercion(lhs_type: &DataType, rhs_type: &DataType) -> Option<DataType> {
     use arrow::datatypes::DataType::*;
     match (lhs_type, rhs_type) {
-        (Binary | Utf8, Binary) | (Binary, Utf8) => Some(Binary),
-        (LargeBinary | Binary | Utf8 | LargeUtf8, LargeBinary)
-        | (LargeBinary, Binary | Utf8 | LargeUtf8) => Some(LargeBinary),
+        // If BinaryView is in any side, we coerce to BinaryView.
+        (BinaryView, BinaryView | Binary | LargeBinary | Utf8 | LargeUtf8 | Utf8View)
+        | (LargeBinary | Binary | Utf8 | LargeUtf8 | Utf8View, BinaryView) => {
+            Some(BinaryView)
+        }
+        // Prefer LargeBinary over Binary
+        (LargeBinary | Binary | Utf8 | LargeUtf8 | Utf8View, LargeBinary)
+        | (LargeBinary, Binary | Utf8 | LargeUtf8 | Utf8View) => Some(LargeBinary),
+
+        // If Utf8View/LargeUtf8 presents need to be large Binary
+        (Utf8View | LargeUtf8, Binary) | (Binary, Utf8View | LargeUtf8) => {
+            Some(LargeBinary)
+        }
+        (Binary, Utf8) | (Utf8, Binary) => Some(Binary),
         _ => None,
     }
 }
@@ -1002,7 +1026,6 @@ pub fn like_coercion(lhs_type: &DataType, rhs_type: &DataType) -> Option<DataTyp
 /// This is a union of string coercion rules and dictionary coercion rules
 pub fn regex_coercion(lhs_type: &DataType, rhs_type: &DataType) -> Option<DataType> {
     string_coercion(lhs_type, rhs_type)
-        .or_else(|| list_coercion(lhs_type, rhs_type))
         .or_else(|| dictionary_coercion(lhs_type, rhs_type, false))
 }
 
@@ -1019,16 +1042,97 @@ fn is_time_with_valid_unit(datatype: DataType) -> bool {
     )
 }
 
+/// Non-strict Timezone Coercion is useful in scenarios where we can guarantee
+/// a stable relationship between two timestamps of different timezones.
+///
+/// An example of this is binary comparisons (<, >, ==, etc). Arrow stores timestamps
+/// as relative to UTC epoch, and then adds the timezone as an offset. As a result, we can always
+/// do a binary comparison between the two times.
+///
+/// Timezone coercion is handled by the following rules:
+/// - If only one has a timezone, coerce the other to match
+/// - If both have a timezone, coerce to the left type
+/// - "UTC" and "+00:00" are considered equivalent
+fn temporal_coercion_nonstrict_timezone(
+    lhs_type: &DataType,
+    rhs_type: &DataType,
+) -> Option<DataType> {
+    use arrow::datatypes::DataType::*;
+
+    match (lhs_type, rhs_type) {
+        (Timestamp(lhs_unit, lhs_tz), Timestamp(rhs_unit, rhs_tz)) => {
+            let tz = match (lhs_tz, rhs_tz) {
+                // If both have a timezone, use the left timezone.
+                (Some(lhs_tz), Some(_rhs_tz)) => Some(Arc::clone(lhs_tz)),
+                (Some(lhs_tz), None) => Some(Arc::clone(lhs_tz)),
+                (None, Some(rhs_tz)) => Some(Arc::clone(rhs_tz)),
+                (None, None) => None,
+            };
+
+            let unit = timeunit_coercion(lhs_unit, rhs_unit);
+
+            Some(Timestamp(unit, tz))
+        }
+        _ => temporal_coercion(lhs_type, rhs_type),
+    }
+}
+
+/// Strict Timezone coercion is useful in scenarios where we cannot guarantee a stable relationship
+/// between two timestamps with different timezones or do not want implicit coercion between them.
+///
+/// An example of this when attempting to coerce function arguments. Functions already have a mechanism
+/// for defining which timestamp types they want to support, so we do not want to do any further coercion.
+///
 /// Coercion rules for Temporal columns: the type that both lhs and rhs can be
 /// casted to for the purpose of a date computation
 /// For interval arithmetic, it doesn't handle datetime type +/- interval
+/// Timezone coercion is handled by the following rules:
+/// - If only one has a timezone, coerce the other to match
+/// - If both have a timezone, throw an error
+/// - "UTC" and "+00:00" are considered equivalent
+fn temporal_coercion_strict_timezone(
+    lhs_type: &DataType,
+    rhs_type: &DataType,
+) -> Option<DataType> {
+    use arrow::datatypes::DataType::*;
+
+    match (lhs_type, rhs_type) {
+        (Timestamp(lhs_unit, lhs_tz), Timestamp(rhs_unit, rhs_tz)) => {
+            let tz = match (lhs_tz, rhs_tz) {
+                (Some(lhs_tz), Some(rhs_tz)) => {
+                    match (lhs_tz.as_ref(), rhs_tz.as_ref()) {
+                        // UTC and "+00:00" are the same by definition. Most other timezones
+                        // do not have a 1-1 mapping between timezone and an offset from UTC
+                        ("UTC", "+00:00") | ("+00:00", "UTC") => Some(Arc::clone(lhs_tz)),
+                        (lhs, rhs) if lhs == rhs => Some(Arc::clone(lhs_tz)),
+                        // can't cast across timezones
+                        _ => {
+                            return None;
+                        }
+                    }
+                }
+                (Some(lhs_tz), None) => Some(Arc::clone(lhs_tz)),
+                (None, Some(rhs_tz)) => Some(Arc::clone(rhs_tz)),
+                (None, None) => None,
+            };
+
+            let unit = timeunit_coercion(lhs_unit, rhs_unit);
+
+            Some(Timestamp(unit, tz))
+        }
+        _ => temporal_coercion(lhs_type, rhs_type),
+    }
+}
+
 fn temporal_coercion(lhs_type: &DataType, rhs_type: &DataType) -> Option<DataType> {
     use arrow::datatypes::DataType::*;
     use arrow::datatypes::IntervalUnit::*;
     use arrow::datatypes::TimeUnit::*;
 
     match (lhs_type, rhs_type) {
-        (Interval(_), Interval(_)) => Some(Interval(MonthDayNano)),
+        (Interval(_) | Duration(_), Interval(_) | Duration(_)) => {
+            Some(Interval(MonthDayNano))
+        }
         (Date64, Date32) | (Date32, Date64) => Some(Date64),
         (Timestamp(_, None), Date64) | (Date64, Timestamp(_, None)) => {
             Some(Timestamp(Nanosecond, None))
@@ -1042,47 +1146,29 @@ fn temporal_coercion(lhs_type: &DataType, rhs_type: &DataType) -> Option<DataTyp
         (Timestamp(_, _tz), Date32) | (Date32, Timestamp(_, _tz)) => {
             Some(Timestamp(Nanosecond, None))
         }
-        (Timestamp(lhs_unit, lhs_tz), Timestamp(rhs_unit, rhs_tz)) => {
-            let tz = match (lhs_tz, rhs_tz) {
-                (Some(lhs_tz), Some(rhs_tz)) => {
-                    match (lhs_tz.as_ref(), rhs_tz.as_ref()) {
-                        // UTC and "+00:00" are the same by definition. Most other timezones
-                        // do not have a 1-1 mapping between timezone and an offset from UTC
-                        ("UTC", "+00:00") | ("+00:00", "UTC") => Some(lhs_tz.clone()),
-                        (lhs, rhs) if lhs == rhs => Some(lhs_tz.clone()),
-                        // can't cast across timezones
-                        _ => {
-                            return None;
-                        }
-                    }
-                }
-                (Some(lhs_tz), None) => Some(lhs_tz.clone()),
-                (None, Some(rhs_tz)) => Some(rhs_tz.clone()),
-                (None, None) => None,
-            };
-
-            let unit = match (lhs_unit, rhs_unit) {
-                (Second, Millisecond) => Second,
-                (Second, Microsecond) => Second,
-                (Second, Nanosecond) => Second,
-                (Millisecond, Second) => Second,
-                (Millisecond, Microsecond) => Millisecond,
-                (Millisecond, Nanosecond) => Millisecond,
-                (Microsecond, Second) => Second,
-                (Microsecond, Millisecond) => Millisecond,
-                (Microsecond, Nanosecond) => Microsecond,
-                (Nanosecond, Second) => Second,
-                (Nanosecond, Millisecond) => Millisecond,
-                (Nanosecond, Microsecond) => Microsecond,
-                (l, r) => {
-                    assert_eq!(l, r);
-                    l.clone()
-                }
-            };
-
-            Some(Timestamp(unit, tz))
-        }
         _ => None,
+    }
+}
+
+fn timeunit_coercion(lhs_unit: &TimeUnit, rhs_unit: &TimeUnit) -> TimeUnit {
+    use arrow::datatypes::TimeUnit::*;
+    match (lhs_unit, rhs_unit) {
+        (Second, Millisecond) => Second,
+        (Second, Microsecond) => Second,
+        (Second, Nanosecond) => Second,
+        (Millisecond, Second) => Second,
+        (Millisecond, Microsecond) => Millisecond,
+        (Millisecond, Nanosecond) => Millisecond,
+        (Microsecond, Second) => Second,
+        (Microsecond, Millisecond) => Millisecond,
+        (Microsecond, Nanosecond) => Microsecond,
+        (Nanosecond, Second) => Second,
+        (Nanosecond, Millisecond) => Millisecond,
+        (Nanosecond, Microsecond) => Microsecond,
+        (l, r) => {
+            assert_eq!(l, r);
+            *l
+        }
     }
 }
 
@@ -1152,8 +1238,8 @@ mod tests {
         ];
         for (i, input_type) in input_types.iter().enumerate() {
             let expect_type = &result_types[i];
-            for op in &comparison_op_types {
-                let (lhs, rhs) = get_input_types(&input_decimal, op, input_type)?;
+            for op in comparison_op_types {
+                let (lhs, rhs) = get_input_types(&input_decimal, &op, input_type)?;
                 assert_eq!(expect_type, &lhs);
                 assert_eq!(expect_type, &rhs);
             }
@@ -1708,6 +1794,33 @@ mod tests {
             DataType::LargeUtf8,
             Operator::Eq,
             DataType::LargeBinary
+        );
+
+        // Timestamps
+        let utc: Option<Arc<str>> = Some("UTC".into());
+        test_coercion_binary_rule!(
+            DataType::Timestamp(TimeUnit::Second, utc.clone()),
+            DataType::Timestamp(TimeUnit::Second, utc.clone()),
+            Operator::Eq,
+            DataType::Timestamp(TimeUnit::Second, utc.clone())
+        );
+        test_coercion_binary_rule!(
+            DataType::Timestamp(TimeUnit::Second, utc.clone()),
+            DataType::Timestamp(TimeUnit::Second, Some("Europe/Brussels".into())),
+            Operator::Eq,
+            DataType::Timestamp(TimeUnit::Second, utc.clone())
+        );
+        test_coercion_binary_rule!(
+            DataType::Timestamp(TimeUnit::Second, Some("America/New_York".into())),
+            DataType::Timestamp(TimeUnit::Second, Some("Europe/Brussels".into())),
+            Operator::Eq,
+            DataType::Timestamp(TimeUnit::Second, Some("America/New_York".into()))
+        );
+        test_coercion_binary_rule!(
+            DataType::Timestamp(TimeUnit::Second, Some("Europe/Brussels".into())),
+            DataType::Timestamp(TimeUnit::Second, utc.clone()),
+            Operator::Eq,
+            DataType::Timestamp(TimeUnit::Second, Some("Europe/Brussels".into()))
         );
 
         // TODO add other data type

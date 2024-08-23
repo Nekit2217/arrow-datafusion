@@ -35,14 +35,14 @@ use datafusion_common::tree_node::{
 use datafusion_common::utils::get_at_indices;
 use datafusion_common::{
     internal_err, plan_datafusion_err, plan_err, Column, DFSchema, DFSchemaRef, Result,
-    ScalarValue, TableReference,
+    TableReference,
 };
 
 use sqlparser::ast::{ExceptSelectItem, ExcludeSelectItem, WildcardAdditionalOptions};
 
 ///  The value to which `COUNT(*)` is expanded to in
 ///  `COUNT(<constant>)` expressions
-pub const COUNT_STAR_EXPANSION: ScalarValue = ScalarValue::Int64(Some(1));
+pub use datafusion_common::utils::expr::COUNT_STAR_EXPANSION;
 
 /// Recursively walk a list of expression trees, collecting the unique set of columns
 /// referenced in the expression
@@ -864,6 +864,7 @@ pub fn can_hash(data_type: &DataType) -> bool {
         DataType::List(_) => true,
         DataType::LargeList(_) => true,
         DataType::FixedSizeList(_, _) => true,
+        DataType::Struct(fields) => fields.iter().all(|f| can_hash(f.data_type())),
         _ => false,
     }
 }
@@ -996,7 +997,7 @@ fn split_conjunction_impl<'a>(expr: &'a Expr, mut exprs: Vec<&'a Expr>) -> Vec<&
 /// assert_eq!(split_conjunction_owned(expr), split);
 /// ```
 pub fn split_conjunction_owned(expr: Expr) -> Vec<Expr> {
-    split_binary_owned(expr, &Operator::And)
+    split_binary_owned(expr, Operator::And)
 }
 
 /// Splits an owned binary operator tree [`Expr`] such as `A <OP> B <OP> C` => `[A, B, C]`
@@ -1019,19 +1020,19 @@ pub fn split_conjunction_owned(expr: Expr) -> Vec<Expr> {
 /// ];
 ///
 /// // use split_binary_owned to split them
-/// assert_eq!(split_binary_owned(expr, &Operator::Plus), split);
+/// assert_eq!(split_binary_owned(expr, Operator::Plus), split);
 /// ```
-pub fn split_binary_owned(expr: Expr, op: &Operator) -> Vec<Expr> {
+pub fn split_binary_owned(expr: Expr, op: Operator) -> Vec<Expr> {
     split_binary_owned_impl(expr, op, vec![])
 }
 
 fn split_binary_owned_impl(
     expr: Expr,
-    operator: &Operator,
+    operator: Operator,
     mut exprs: Vec<Expr>,
 ) -> Vec<Expr> {
     match expr {
-        Expr::BinaryExpr(BinaryExpr { right, op, left }) if &op == operator => {
+        Expr::BinaryExpr(BinaryExpr { right, op, left }) if op == operator => {
             let exprs = split_binary_owned_impl(*left, operator, exprs);
             split_binary_owned_impl(*right, operator, exprs)
         }
@@ -1048,17 +1049,17 @@ fn split_binary_owned_impl(
 /// Splits an binary operator tree [`Expr`] such as `A <OP> B <OP> C` => `[A, B, C]`
 ///
 /// See [`split_binary_owned`] for more details and an example.
-pub fn split_binary<'a>(expr: &'a Expr, op: &Operator) -> Vec<&'a Expr> {
+pub fn split_binary(expr: &Expr, op: Operator) -> Vec<&Expr> {
     split_binary_impl(expr, op, vec![])
 }
 
 fn split_binary_impl<'a>(
     expr: &'a Expr,
-    operator: &Operator,
+    operator: Operator,
     mut exprs: Vec<&'a Expr>,
 ) -> Vec<&'a Expr> {
     match expr {
-        Expr::BinaryExpr(BinaryExpr { right, op, left }) if op == operator => {
+        Expr::BinaryExpr(BinaryExpr { right, op, left }) if *op == operator => {
             let exprs = split_binary_impl(left, operator, exprs);
             split_binary_impl(right, operator, exprs)
         }
@@ -1199,7 +1200,7 @@ pub fn only_or_err<T>(slice: &[T]) -> Result<&T> {
 /// merge inputs schema into a single schema.
 pub fn merge_schema(inputs: Vec<&LogicalPlan>) -> DFSchema {
     if inputs.len() == 1 {
-        inputs[0].schema().clone().as_ref().clone()
+        inputs[0].schema().as_ref().clone()
     } else {
         inputs.iter().map(|input| input.schema()).fold(
             DFSchema::empty(),
@@ -1211,7 +1212,7 @@ pub fn merge_schema(inputs: Vec<&LogicalPlan>) -> DFSchema {
     }
 }
 
-/// Build state name. State is the intermidiate state of the aggregate function.
+/// Build state name. State is the intermediate state of the aggregate function.
 pub fn format_state_name(name: &str, state_name: &str) -> String {
     format!("{name}[{state_name}]")
 }
@@ -1252,7 +1253,8 @@ mod tests {
     use super::*;
     use crate::{
         col, cube, expr, expr_vec_fmt, grouping_set, lit, rollup,
-        test::function_stub::sum_udaf, AggregateFunction, Cast, WindowFrame,
+        test::function_stub::max_udaf, test::function_stub::min_udaf,
+        test::function_stub::sum_udaf, Cast, ExprFunctionExt, WindowFrame,
         WindowFunctionDefinition,
     };
 
@@ -1267,36 +1269,20 @@ mod tests {
     #[test]
     fn test_group_window_expr_by_sort_keys_empty_window() -> Result<()> {
         let max1 = Expr::WindowFunction(expr::WindowFunction::new(
-            WindowFunctionDefinition::AggregateFunction(AggregateFunction::Max),
+            WindowFunctionDefinition::AggregateUDF(max_udaf()),
             vec![col("name")],
-            vec![],
-            vec![],
-            WindowFrame::new(None),
-            None,
         ));
         let max2 = Expr::WindowFunction(expr::WindowFunction::new(
-            WindowFunctionDefinition::AggregateFunction(AggregateFunction::Max),
+            WindowFunctionDefinition::AggregateUDF(max_udaf()),
             vec![col("name")],
-            vec![],
-            vec![],
-            WindowFrame::new(None),
-            None,
         ));
         let min3 = Expr::WindowFunction(expr::WindowFunction::new(
-            WindowFunctionDefinition::AggregateFunction(AggregateFunction::Min),
+            WindowFunctionDefinition::AggregateUDF(min_udaf()),
             vec![col("name")],
-            vec![],
-            vec![],
-            WindowFrame::new(None),
-            None,
         ));
         let sum4 = Expr::WindowFunction(expr::WindowFunction::new(
             WindowFunctionDefinition::AggregateUDF(sum_udaf()),
             vec![col("age")],
-            vec![],
-            vec![],
-            WindowFrame::new(None),
-            None,
         ));
         let exprs = &[max1.clone(), max2.clone(), min3.clone(), sum4.clone()];
         let result = group_window_expr_by_sort_keys(exprs.to_vec())?;
@@ -1314,37 +1300,34 @@ mod tests {
         let created_at_desc =
             Expr::Sort(expr::Sort::new(Box::new(col("created_at")), false, true));
         let max1 = Expr::WindowFunction(expr::WindowFunction::new(
-            WindowFunctionDefinition::AggregateFunction(AggregateFunction::Max),
+            WindowFunctionDefinition::AggregateUDF(max_udaf()),
             vec![col("name")],
-            vec![],
-            vec![age_asc.clone(), name_desc.clone()],
-            WindowFrame::new(Some(false)),
-            None,
-        ));
+        ))
+        .order_by(vec![age_asc.clone(), name_desc.clone()])
+        .build()
+        .unwrap();
         let max2 = Expr::WindowFunction(expr::WindowFunction::new(
-            WindowFunctionDefinition::AggregateFunction(AggregateFunction::Max),
+            WindowFunctionDefinition::AggregateUDF(max_udaf()),
             vec![col("name")],
-            vec![],
-            vec![],
-            WindowFrame::new(None),
-            None,
         ));
         let min3 = Expr::WindowFunction(expr::WindowFunction::new(
-            WindowFunctionDefinition::AggregateFunction(AggregateFunction::Min),
+            WindowFunctionDefinition::AggregateUDF(min_udaf()),
             vec![col("name")],
-            vec![],
-            vec![age_asc.clone(), name_desc.clone()],
-            WindowFrame::new(Some(false)),
-            None,
-        ));
+        ))
+        .order_by(vec![age_asc.clone(), name_desc.clone()])
+        .build()
+        .unwrap();
         let sum4 = Expr::WindowFunction(expr::WindowFunction::new(
             WindowFunctionDefinition::AggregateUDF(sum_udaf()),
             vec![col("age")],
-            vec![],
-            vec![name_desc.clone(), age_asc.clone(), created_at_desc.clone()],
-            WindowFrame::new(Some(false)),
-            None,
-        ));
+        ))
+        .order_by(vec![
+            name_desc.clone(),
+            age_asc.clone(),
+            created_at_desc.clone(),
+        ])
+        .build()
+        .unwrap();
         // FIXME use as_ref
         let exprs = &[max1.clone(), max2.clone(), min3.clone(), sum4.clone()];
         let result = group_window_expr_by_sort_keys(exprs.to_vec())?;
@@ -1370,28 +1353,28 @@ mod tests {
     fn test_find_sort_exprs() -> Result<()> {
         let exprs = &[
             Expr::WindowFunction(expr::WindowFunction::new(
-                WindowFunctionDefinition::AggregateFunction(AggregateFunction::Max),
+                WindowFunctionDefinition::AggregateUDF(max_udaf()),
                 vec![col("name")],
-                vec![],
-                vec![
-                    Expr::Sort(expr::Sort::new(Box::new(col("age")), true, true)),
-                    Expr::Sort(expr::Sort::new(Box::new(col("name")), false, true)),
-                ],
-                WindowFrame::new(Some(false)),
-                None,
-            )),
+            ))
+            .order_by(vec![
+                Expr::Sort(expr::Sort::new(Box::new(col("age")), true, true)),
+                Expr::Sort(expr::Sort::new(Box::new(col("name")), false, true)),
+            ])
+            .window_frame(WindowFrame::new(Some(false)))
+            .build()
+            .unwrap(),
             Expr::WindowFunction(expr::WindowFunction::new(
                 WindowFunctionDefinition::AggregateUDF(sum_udaf()),
                 vec![col("age")],
-                vec![],
-                vec![
-                    Expr::Sort(expr::Sort::new(Box::new(col("name")), false, true)),
-                    Expr::Sort(expr::Sort::new(Box::new(col("age")), true, true)),
-                    Expr::Sort(expr::Sort::new(Box::new(col("created_at")), false, true)),
-                ],
-                WindowFrame::new(Some(false)),
-                None,
-            )),
+            ))
+            .order_by(vec![
+                Expr::Sort(expr::Sort::new(Box::new(col("name")), false, true)),
+                Expr::Sort(expr::Sort::new(Box::new(col("age")), true, true)),
+                Expr::Sort(expr::Sort::new(Box::new(col("created_at")), false, true)),
+            ])
+            .window_frame(WindowFrame::new(Some(false)))
+            .build()
+            .unwrap(),
         ];
         let expected = vec![
             Expr::Sort(expr::Sort::new(Box::new(col("age")), true, true)),
@@ -1612,13 +1595,13 @@ mod tests {
     #[test]
     fn test_split_binary_owned() {
         let expr = col("a");
-        assert_eq!(split_binary_owned(expr.clone(), &Operator::And), vec![expr]);
+        assert_eq!(split_binary_owned(expr.clone(), Operator::And), vec![expr]);
     }
 
     #[test]
     fn test_split_binary_owned_two() {
         assert_eq!(
-            split_binary_owned(col("a").eq(lit(5)).and(col("b")), &Operator::And),
+            split_binary_owned(col("a").eq(lit(5)).and(col("b")), Operator::And),
             vec![col("a").eq(lit(5)), col("b")]
         );
     }
@@ -1628,7 +1611,7 @@ mod tests {
         let expr = col("a").eq(lit(5)).or(col("b"));
         assert_eq!(
             // expr is connected by OR, but pass in AND
-            split_binary_owned(expr.clone(), &Operator::And),
+            split_binary_owned(expr.clone(), Operator::And),
             vec![expr]
         );
     }

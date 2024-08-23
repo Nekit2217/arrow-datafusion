@@ -20,7 +20,7 @@
 use crate::ColumnarValue;
 use crate::{Accumulator, Expr, PartitionEvaluator};
 use arrow::datatypes::{DataType, Field, Schema};
-use datafusion_common::Result;
+use datafusion_common::{DFSchema, Result};
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy)]
@@ -57,6 +57,9 @@ pub struct AccumulatorArgs<'a> {
     /// The schema of the input arguments
     pub schema: &'a Schema,
 
+    /// The schema of the input arguments
+    pub dfschema: &'a DFSchema,
+
     /// Whether to ignore nulls.
     ///
     /// SQL allows the user to specify `IGNORE NULLS`, for example:
@@ -78,6 +81,9 @@ pub struct AccumulatorArgs<'a> {
     /// If no `ORDER BY` is specified, `sort_exprs`` will be empty.
     pub sort_exprs: &'a [Expr],
 
+    /// Whether the aggregation is running in reverse order
+    pub is_reversed: bool,
+
     /// The name of the aggregate expression
     pub name: &'a str,
 
@@ -88,8 +94,8 @@ pub struct AccumulatorArgs<'a> {
     /// ```
     pub is_distinct: bool,
 
-    /// The input type of the aggregate function.
-    pub input_type: &'a DataType,
+    /// The input types of the aggregate function.
+    pub input_types: &'a [DataType],
 
     /// The logical expression of arguments the aggregate function takes.
     pub input_exprs: &'a [Expr],
@@ -103,8 +109,8 @@ pub struct StateFieldsArgs<'a> {
     /// The name of the aggregate function.
     pub name: &'a str,
 
-    /// The input type of the aggregate function.
-    pub input_type: &'a DataType,
+    /// The input types of the aggregate function.
+    pub input_types: &'a [DataType],
 
     /// The return type of the aggregate function.
     pub return_type: &'a DataType,
