@@ -31,26 +31,28 @@
 
 use std::any::Any;
 use std::fmt::{self, Debug, Formatter};
-use std::hash::{Hash, Hasher};
+use std::hash::Hash;
 use std::sync::Arc;
 
-use crate::physical_expr::{down_cast_any_ref, physical_exprs_equal};
 use crate::PhysicalExpr;
 
 use arrow::datatypes::{DataType, Schema};
 use arrow::record_batch::RecordBatch;
-use datafusion_common::{internal_err, DFSchema, Result};
+use arrow_array::Array;
+use datafusion_common::{internal_err, DFSchema, Result, ScalarValue};
 use datafusion_expr::interval_arithmetic::Interval;
 use datafusion_expr::sort_properties::ExprProperties;
 use datafusion_expr::type_coercion::functions::data_types_with_scalar_udf;
 use datafusion_expr::{expr_vec_fmt, ColumnarValue, Expr, ScalarUDF};
 
 /// Physical expression of a scalar function
+#[derive(Eq, PartialEq, Hash)]
 pub struct ScalarFunctionExpr {
     fun: Arc<ScalarUDF>,
     name: String,
     args: Vec<Arc<dyn PhysicalExpr>>,
     return_type: DataType,
+    nullable: bool,
 }
 
 impl Debug for ScalarFunctionExpr {
@@ -77,6 +79,7 @@ impl ScalarFunctionExpr {
             name: name.to_owned(),
             args,
             return_type,
+            nullable: true,
         }
     }
 
@@ -99,6 +102,15 @@ impl ScalarFunctionExpr {
     pub fn return_type(&self) -> &DataType {
         &self.return_type
     }
+
+    pub fn with_nullable(mut self, nullable: bool) -> Self {
+        self.nullable = nullable;
+        self
+    }
+
+    pub fn nullable(&self) -> bool {
+        self.nullable
+    }
 }
 
 impl fmt::Display for ScalarFunctionExpr {
@@ -118,7 +130,7 @@ impl PhysicalExpr for ScalarFunctionExpr {
     }
 
     fn nullable(&self, _input_schema: &Schema) -> Result<bool> {
-        Ok(true)
+        Ok(self.nullable)
     }
 
     fn evaluate(&self, batch: &RecordBatch) -> Result<ColumnarValue> {
@@ -129,15 +141,23 @@ impl PhysicalExpr for ScalarFunctionExpr {
             .collect::<Result<Vec<_>>>()?;
 
         // evaluate the function
-        let output = match self.args.is_empty() {
-            true => self.fun.invoke_no_args(batch.num_rows()),
-            false => self.fun.invoke(&inputs),
-        }?;
+        let output = self.fun.invoke_batch(&inputs, batch.num_rows())?;
 
         if let ColumnarValue::Array(array) = &output {
             if array.len() != batch.num_rows() {
-                return internal_err!("UDF returned a different number of rows than expected. Expected: {}, Got: {}",
-                        batch.num_rows(), array.len());
+                // If the arguments are a non-empty slice of scalar values, we can assume that
+                // returning a one-element array is equivalent to returning a scalar.
+                let preserve_scalar = array.len() == 1
+                    && !inputs.is_empty()
+                    && inputs
+                        .iter()
+                        .all(|arg| matches!(arg, ColumnarValue::Scalar(_)));
+                return if preserve_scalar {
+                    ScalarValue::try_from_array(array, 0).map(ColumnarValue::Scalar)
+                } else {
+                    internal_err!("UDF returned a different number of rows than expected. Expected: {}, Got: {}",
+                            batch.num_rows(), array.len())
+                };
             }
         }
         Ok(output)
@@ -151,12 +171,15 @@ impl PhysicalExpr for ScalarFunctionExpr {
         self: Arc<Self>,
         children: Vec<Arc<dyn PhysicalExpr>>,
     ) -> Result<Arc<dyn PhysicalExpr>> {
-        Ok(Arc::new(ScalarFunctionExpr::new(
-            &self.name,
-            Arc::clone(&self.fun),
-            children,
-            self.return_type().clone(),
-        )))
+        Ok(Arc::new(
+            ScalarFunctionExpr::new(
+                &self.name,
+                Arc::clone(&self.fun),
+                children,
+                self.return_type().clone(),
+            )
+            .with_nullable(self.nullable),
+        ))
     }
 
     fn evaluate_bounds(&self, children: &[&Interval]) -> Result<Interval> {
@@ -169,14 +192,6 @@ impl PhysicalExpr for ScalarFunctionExpr {
         children: &[&Interval],
     ) -> Result<Option<Vec<Interval>>> {
         self.fun.propagate_constraints(interval, children)
-    }
-
-    fn dyn_hash(&self, state: &mut dyn Hasher) {
-        let mut s = state;
-        self.name.hash(&mut s);
-        self.args.hash(&mut s);
-        self.return_type.hash(&mut s);
-        // Add `self.fun` when hash is available
     }
 
     fn get_properties(&self, children: &[ExprProperties]) -> Result<ExprProperties> {
@@ -194,23 +209,7 @@ impl PhysicalExpr for ScalarFunctionExpr {
     }
 }
 
-impl PartialEq<dyn Any> for ScalarFunctionExpr {
-    /// Comparing name, args and return_type
-    fn eq(&self, other: &dyn Any) -> bool {
-        down_cast_any_ref(other)
-            .downcast_ref::<Self>()
-            .map(|x| {
-                self.name == x.name
-                    && physical_exprs_equal(&self.args, &x.args)
-                    && self.return_type == x.return_type
-            })
-            .unwrap_or(false)
-    }
-}
-
 /// Create a physical expression for the UDF.
-///
-/// Arguments:
 pub fn create_physical_expr(
     fun: &ScalarUDF,
     input_phy_exprs: &[Arc<dyn PhysicalExpr>],
@@ -230,10 +229,13 @@ pub fn create_physical_expr(
     let return_type =
         fun.return_type_from_exprs(args, input_dfschema, &input_expr_types)?;
 
-    Ok(Arc::new(ScalarFunctionExpr::new(
-        fun.name(),
-        Arc::new(fun.clone()),
-        input_phy_exprs.to_vec(),
-        return_type,
-    )))
+    Ok(Arc::new(
+        ScalarFunctionExpr::new(
+            fun.name(),
+            Arc::new(fun.clone()),
+            input_phy_exprs.to_vec(),
+            return_type,
+        )
+        .with_nullable(fun.is_nullable(args, input_dfschema)),
+    ))
 }

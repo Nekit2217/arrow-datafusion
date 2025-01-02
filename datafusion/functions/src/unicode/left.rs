@@ -17,18 +17,25 @@
 
 use std::any::Any;
 use std::cmp::Ordering;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
-use arrow::array::{ArrayRef, GenericStringArray, OffsetSizeTrait};
+use arrow::array::{
+    Array, ArrayAccessor, ArrayIter, ArrayRef, GenericStringArray, Int64Array,
+    OffsetSizeTrait,
+};
 use arrow::datatypes::DataType;
 
-use datafusion_common::cast::{as_generic_string_array, as_int64_array};
+use crate::utils::{make_scalar_function, utf8_to_str_type};
+use datafusion_common::cast::{
+    as_generic_string_array, as_int64_array, as_string_view_array,
+};
 use datafusion_common::exec_err;
 use datafusion_common::Result;
+use datafusion_expr::scalar_doc_sections::DOC_SECTION_STRING;
 use datafusion_expr::TypeSignature::Exact;
-use datafusion_expr::{ColumnarValue, ScalarUDFImpl, Signature, Volatility};
-
-use crate::utils::{make_scalar_function, utf8_to_str_type};
+use datafusion_expr::{
+    ColumnarValue, Documentation, ScalarUDFImpl, Signature, Volatility,
+};
 
 #[derive(Debug)]
 pub struct LeftFunc {
@@ -46,7 +53,11 @@ impl LeftFunc {
         use DataType::*;
         Self {
             signature: Signature::one_of(
-                vec![Exact(vec![Utf8, Int64]), Exact(vec![LargeUtf8, Int64])],
+                vec![
+                    Exact(vec![Utf8View, Int64]),
+                    Exact(vec![Utf8, Int64]),
+                    Exact(vec![LargeUtf8, Int64]),
+                ],
                 Volatility::Immutable,
             ),
         }
@@ -72,21 +83,67 @@ impl ScalarUDFImpl for LeftFunc {
 
     fn invoke(&self, args: &[ColumnarValue]) -> Result<ColumnarValue> {
         match args[0].data_type() {
-            DataType::Utf8 => make_scalar_function(left::<i32>, vec![])(args),
+            DataType::Utf8 | DataType::Utf8View => {
+                make_scalar_function(left::<i32>, vec![])(args)
+            }
             DataType::LargeUtf8 => make_scalar_function(left::<i64>, vec![])(args),
-            other => exec_err!("Unsupported data type {other:?} for function left"),
+            other => exec_err!(
+                "Unsupported data type {other:?} for function left,\
+                expected Utf8View, Utf8 or LargeUtf8."
+            ),
         }
     }
+
+    fn documentation(&self) -> Option<&Documentation> {
+        Some(get_left_doc())
+    }
+}
+
+static DOCUMENTATION: OnceLock<Documentation> = OnceLock::new();
+
+fn get_left_doc() -> &'static Documentation {
+    DOCUMENTATION.get_or_init(|| {
+        Documentation::builder()
+            .with_doc_section(DOC_SECTION_STRING)
+            .with_description("Returns a specified number of characters from the left side of a string.")
+            .with_syntax_example("left(str, n)")
+            .with_sql_example(r#"```sql
+> select left('datafusion', 4);
++-----------------------------------+
+| left(Utf8("datafusion"),Int64(4)) |
++-----------------------------------+
+| data                              |
++-----------------------------------+
+```"#)
+            .with_standard_argument("str", Some("String"))
+            .with_argument("n", "Number of characters to return.")
+            .with_related_udf("right")
+            .build()
+            .unwrap()
+    })
 }
 
 /// Returns first n characters in the string, or when n is negative, returns all but last |n| characters.
 /// left('abcde', 2) = 'ab'
 /// The implementation uses UTF-8 code points as characters
 pub fn left<T: OffsetSizeTrait>(args: &[ArrayRef]) -> Result<ArrayRef> {
-    let string_array = as_generic_string_array::<T>(&args[0])?;
     let n_array = as_int64_array(&args[1])?;
-    let result = string_array
-        .iter()
+
+    if args[0].data_type() == &DataType::Utf8View {
+        let string_array = as_string_view_array(&args[0])?;
+        left_impl::<T, _>(string_array, n_array)
+    } else {
+        let string_array = as_generic_string_array::<T>(&args[0])?;
+        left_impl::<T, _>(string_array, n_array)
+    }
+}
+
+fn left_impl<'a, T: OffsetSizeTrait, V: ArrayAccessor<Item = &'a str>>(
+    string_array: V,
+    n_array: &Int64Array,
+) -> Result<ArrayRef> {
+    let iter = ArrayIter::new(string_array);
+    let result = iter
         .zip(n_array.iter())
         .map(|(string, n)| match (string, n) {
             (Some(string), Some(n)) => match n.cmp(&0) {

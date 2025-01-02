@@ -16,17 +16,21 @@
 // under the License.
 
 use std::any::Any;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
-use arrow::array::{ArrayRef, OffsetSizeTrait, StringBuilder};
-use arrow::datatypes::DataType;
-
-use datafusion_common::cast::{as_generic_string_array, as_int64_array};
-use datafusion_common::{exec_err, Result};
-use datafusion_expr::TypeSignature::Exact;
-use datafusion_expr::{ColumnarValue, ScalarUDFImpl, Signature, Volatility};
+use arrow::array::{
+    ArrayAccessor, ArrayIter, ArrayRef, ArrowPrimitiveType, AsArray, OffsetSizeTrait,
+    PrimitiveArray, StringBuilder,
+};
+use arrow::datatypes::{DataType, Int32Type, Int64Type};
 
 use crate::utils::{make_scalar_function, utf8_to_str_type};
+use datafusion_common::{exec_err, Result};
+use datafusion_expr::scalar_doc_sections::DOC_SECTION_STRING;
+use datafusion_expr::TypeSignature::Exact;
+use datafusion_expr::{
+    ColumnarValue, Documentation, ScalarUDFImpl, Signature, Volatility,
+};
 
 #[derive(Debug)]
 pub struct SubstrIndexFunc {
@@ -46,6 +50,7 @@ impl SubstrIndexFunc {
         Self {
             signature: Signature::one_of(
                 vec![
+                    Exact(vec![Utf8View, Utf8View, Int64]),
                     Exact(vec![Utf8, Utf8, Int64]),
                     Exact(vec![LargeUtf8, LargeUtf8, Int64]),
                 ],
@@ -74,20 +79,48 @@ impl ScalarUDFImpl for SubstrIndexFunc {
     }
 
     fn invoke(&self, args: &[ColumnarValue]) -> Result<ColumnarValue> {
-        match args[0].data_type() {
-            DataType::Utf8 => make_scalar_function(substr_index::<i32>, vec![])(args),
-            DataType::LargeUtf8 => {
-                make_scalar_function(substr_index::<i64>, vec![])(args)
-            }
-            other => {
-                exec_err!("Unsupported data type {other:?} for function substr_index")
-            }
-        }
+        make_scalar_function(substr_index, vec![])(args)
     }
 
     fn aliases(&self) -> &[String] {
         &self.aliases
     }
+
+    fn documentation(&self) -> Option<&Documentation> {
+        Some(get_substr_index_doc())
+    }
+}
+
+static DOCUMENTATION: OnceLock<Documentation> = OnceLock::new();
+
+fn get_substr_index_doc() -> &'static Documentation {
+    DOCUMENTATION.get_or_init(|| {
+        Documentation::builder()
+            .with_doc_section(DOC_SECTION_STRING)
+            .with_description(r#"Returns the substring from str before count occurrences of the delimiter delim.
+If count is positive, everything to the left of the final delimiter (counting from the left) is returned.
+If count is negative, everything to the right of the final delimiter (counting from the right) is returned."#)
+            .with_syntax_example("substr_index(str, delim, count)")
+            .with_sql_example(r#"```sql
+> select substr_index('www.apache.org', '.', 1);
++---------------------------------------------------------+
+| substr_index(Utf8("www.apache.org"),Utf8("."),Int64(1)) |
++---------------------------------------------------------+
+| www                                                     |
++---------------------------------------------------------+
+> select substr_index('www.apache.org', '.', -1);
++----------------------------------------------------------+
+| substr_index(Utf8("www.apache.org"),Utf8("."),Int64(-1)) |
++----------------------------------------------------------+
+| org                                                      |
++----------------------------------------------------------+
+```"#)
+            .with_standard_argument("str", Some("String"))
+            .with_argument("delim", "The string to find in str to split str.")
+            .with_argument("count", "The number of times to search for the delimiter. Can be either a positive or negative number.")
+            .build()
+            .unwrap()
+    })
 }
 
 /// Returns the substring from str before count occurrences of the delimiter delim. If count is positive, everything to the left of the final delimiter (counting from the left) is returned. If count is negative, everything to the right of the final delimiter (counting from the right) is returned.
@@ -95,7 +128,7 @@ impl ScalarUDFImpl for SubstrIndexFunc {
 /// SUBSTRING_INDEX('www.apache.org', '.', 2) = www.apache
 /// SUBSTRING_INDEX('www.apache.org', '.', -2) = apache.org
 /// SUBSTRING_INDEX('www.apache.org', '.', -1) = org
-pub fn substr_index<T: OffsetSizeTrait>(args: &[ArrayRef]) -> Result<ArrayRef> {
+fn substr_index(args: &[ArrayRef]) -> Result<ArrayRef> {
     if args.len() != 3 {
         return exec_err!(
             "substr_index was called with {} arguments. It requires 3.",
@@ -103,15 +136,63 @@ pub fn substr_index<T: OffsetSizeTrait>(args: &[ArrayRef]) -> Result<ArrayRef> {
         );
     }
 
-    let string_array = as_generic_string_array::<T>(&args[0])?;
-    let delimiter_array = as_generic_string_array::<T>(&args[1])?;
-    let count_array = as_int64_array(&args[2])?;
+    match args[0].data_type() {
+        DataType::Utf8 => {
+            let string_array = args[0].as_string::<i32>();
+            let delimiter_array = args[1].as_string::<i32>();
+            let count_array: &PrimitiveArray<Int64Type> = args[2].as_primitive();
+            substr_index_general::<Int32Type, _, _>(
+                string_array,
+                delimiter_array,
+                count_array,
+            )
+        }
+        DataType::LargeUtf8 => {
+            let string_array = args[0].as_string::<i64>();
+            let delimiter_array = args[1].as_string::<i64>();
+            let count_array: &PrimitiveArray<Int64Type> = args[2].as_primitive();
+            substr_index_general::<Int64Type, _, _>(
+                string_array,
+                delimiter_array,
+                count_array,
+            )
+        }
+        DataType::Utf8View => {
+            let string_array = args[0].as_string_view();
+            let delimiter_array = args[1].as_string_view();
+            let count_array: &PrimitiveArray<Int64Type> = args[2].as_primitive();
+            substr_index_general::<Int32Type, _, _>(
+                string_array,
+                delimiter_array,
+                count_array,
+            )
+        }
+        other => {
+            exec_err!("Unsupported data type {other:?} for function substr_index")
+        }
+    }
+}
 
+pub fn substr_index_general<
+    'a,
+    T: ArrowPrimitiveType,
+    V: ArrayAccessor<Item = &'a str>,
+    P: ArrayAccessor<Item = i64>,
+>(
+    string_array: V,
+    delimiter_array: V,
+    count_array: P,
+) -> Result<ArrayRef>
+where
+    T::Native: OffsetSizeTrait,
+{
     let mut builder = StringBuilder::new();
-    string_array
-        .iter()
-        .zip(delimiter_array.iter())
-        .zip(count_array.iter())
+    let string_iter = ArrayIter::new(string_array);
+    let delimiter_array_iter = ArrayIter::new(delimiter_array);
+    let count_array_iter = ArrayIter::new(count_array);
+    string_iter
+        .zip(delimiter_array_iter)
+        .zip(count_array_iter)
         .for_each(|((string, delimiter), n)| match (string, delimiter, n) {
             (Some(string), Some(delimiter), Some(n)) => {
                 // In MySQL, these cases will return an empty string.

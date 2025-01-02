@@ -22,13 +22,12 @@ use std::fmt::Debug;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use crate::physical_expr::{down_cast_any_ref, physical_exprs_bag_equal};
+use crate::physical_expr::physical_exprs_bag_equal;
 use crate::PhysicalExpr;
 
 use arrow::array::*;
 use arrow::buffer::BooleanBuffer;
 use arrow::compute::kernels::boolean::{not, or_kleene};
-use arrow::compute::kernels::cmp::eq;
 use arrow::compute::take;
 use arrow::datatypes::*;
 use arrow::util::bit_iterator::BitIndexIterator;
@@ -42,10 +41,11 @@ use datafusion_common::{
     exec_err, internal_err, not_impl_err, DFSchema, Result, ScalarValue,
 };
 use datafusion_expr::ColumnarValue;
+use datafusion_physical_expr_common::datum::compare_with_eq;
 
 use ahash::RandomState;
+use datafusion_common::HashMap;
 use hashbrown::hash_map::RawEntryMut;
-use hashbrown::HashMap;
 
 /// InList
 pub struct InListExpr {
@@ -356,13 +356,16 @@ impl PhysicalExpr for InListExpr {
             Some(f) => f.contains(value.into_array(num_rows)?.as_ref(), self.negated)?,
             None => {
                 let value = value.into_array(num_rows)?;
+                let is_nested = value.data_type().is_nested();
                 let found = self.list.iter().map(|expr| expr.evaluate(batch)).try_fold(
                     BooleanArray::new(BooleanBuffer::new_unset(num_rows), None),
                     |result, expr| -> Result<BooleanArray> {
-                        Ok(or_kleene(
-                            &result,
-                            &eq(&value, &expr?.into_array(num_rows)?)?,
-                        )?)
+                        let rhs = compare_with_eq(
+                            &value,
+                            &expr?.into_array(num_rows)?,
+                            is_nested,
+                        )?;
+                        Ok(or_kleene(&result, &rhs)?)
                     },
                 )?;
 
@@ -395,26 +398,24 @@ impl PhysicalExpr for InListExpr {
             self.static_filter.clone(),
         )))
     }
+}
 
-    fn dyn_hash(&self, state: &mut dyn Hasher) {
-        let mut s = state;
-        self.expr.hash(&mut s);
-        self.negated.hash(&mut s);
-        self.list.hash(&mut s);
-        // Add `self.static_filter` when hash is available
+impl PartialEq for InListExpr {
+    fn eq(&self, other: &Self) -> bool {
+        self.expr.eq(&other.expr)
+            && physical_exprs_bag_equal(&self.list, &other.list)
+            && self.negated == other.negated
     }
 }
 
-impl PartialEq<dyn Any> for InListExpr {
-    fn eq(&self, other: &dyn Any) -> bool {
-        down_cast_any_ref(other)
-            .downcast_ref::<Self>()
-            .map(|x| {
-                self.expr.eq(&x.expr)
-                    && physical_exprs_bag_equal(&self.list, &x.list)
-                    && self.negated == x.negated
-            })
-            .unwrap_or(false)
+impl Eq for InListExpr {}
+
+impl Hash for InListExpr {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.expr.hash(state);
+        self.negated.hash(state);
+        self.list.hash(state);
+        // Add `self.static_filter` when hash is available
     }
 }
 
@@ -1099,7 +1100,7 @@ mod tests {
         let mut phy_exprs = vec![
             lit(1i64),
             expressions::cast(lit(2i32), &schema, DataType::Int64)?,
-            expressions::try_cast(lit(3.13f32), &schema, DataType::Int64)?,
+            try_cast(lit(3.13f32), &schema, DataType::Int64)?,
         ];
         let result = try_cast_static_filter_to_set(&phy_exprs, &schema).unwrap();
 
@@ -1127,7 +1128,7 @@ mod tests {
         try_cast_static_filter_to_set(&phy_exprs, &schema).unwrap();
 
         // column
-        phy_exprs.push(expressions::col("a", &schema)?);
+        phy_exprs.push(col("a", &schema)?);
         assert!(try_cast_static_filter_to_set(&phy_exprs, &schema).is_err());
 
         Ok(())

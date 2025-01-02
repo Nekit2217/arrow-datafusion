@@ -17,18 +17,25 @@
 
 use std::any::Any;
 use std::cmp::{max, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
-use arrow::array::{ArrayRef, GenericStringArray, OffsetSizeTrait};
+use arrow::array::{
+    Array, ArrayAccessor, ArrayIter, ArrayRef, GenericStringArray, Int64Array,
+    OffsetSizeTrait,
+};
 use arrow::datatypes::DataType;
 
-use datafusion_common::cast::{as_generic_string_array, as_int64_array};
+use crate::utils::{make_scalar_function, utf8_to_str_type};
+use datafusion_common::cast::{
+    as_generic_string_array, as_int64_array, as_string_view_array,
+};
 use datafusion_common::exec_err;
 use datafusion_common::Result;
+use datafusion_expr::scalar_doc_sections::DOC_SECTION_STRING;
 use datafusion_expr::TypeSignature::Exact;
-use datafusion_expr::{ColumnarValue, ScalarUDFImpl, Signature, Volatility};
-
-use crate::utils::{make_scalar_function, utf8_to_str_type};
+use datafusion_expr::{
+    ColumnarValue, Documentation, ScalarUDFImpl, Signature, Volatility,
+};
 
 #[derive(Debug)]
 pub struct RightFunc {
@@ -46,7 +53,11 @@ impl RightFunc {
         use DataType::*;
         Self {
             signature: Signature::one_of(
-                vec![Exact(vec![Utf8, Int64]), Exact(vec![LargeUtf8, Int64])],
+                vec![
+                    Exact(vec![Utf8View, Int64]),
+                    Exact(vec![Utf8, Int64]),
+                    Exact(vec![LargeUtf8, Int64]),
+                ],
                 Volatility::Immutable,
             ),
         }
@@ -72,22 +83,70 @@ impl ScalarUDFImpl for RightFunc {
 
     fn invoke(&self, args: &[ColumnarValue]) -> Result<ColumnarValue> {
         match args[0].data_type() {
-            DataType::Utf8 => make_scalar_function(right::<i32>, vec![])(args),
+            DataType::Utf8 | DataType::Utf8View => {
+                make_scalar_function(right::<i32>, vec![])(args)
+            }
             DataType::LargeUtf8 => make_scalar_function(right::<i64>, vec![])(args),
-            other => exec_err!("Unsupported data type {other:?} for function right"),
+            other => exec_err!(
+                "Unsupported data type {other:?} for function right,\
+            expected Utf8View, Utf8 or LargeUtf8."
+            ),
         }
     }
+
+    fn documentation(&self) -> Option<&Documentation> {
+        Some(get_right_doc())
+    }
+}
+
+static DOCUMENTATION: OnceLock<Documentation> = OnceLock::new();
+
+fn get_right_doc() -> &'static Documentation {
+    DOCUMENTATION.get_or_init(|| {
+        Documentation::builder()
+            .with_doc_section(DOC_SECTION_STRING)
+            .with_description("Returns a specified number of characters from the right side of a string.")
+            .with_syntax_example("right(str, n)")
+            .with_sql_example(r#"```sql
+> select right('datafusion', 6);
++------------------------------------+
+| right(Utf8("datafusion"),Int64(6)) |
++------------------------------------+
+| fusion                             |
++------------------------------------+
+```"#)
+            .with_standard_argument("str", Some("String"))
+            .with_argument("n", "Number of characters to return")
+            .with_related_udf("left")
+            .build()
+            .unwrap()
+    })
 }
 
 /// Returns last n characters in the string, or when n is negative, returns all but first |n| characters.
 /// right('abcde', 2) = 'de'
 /// The implementation uses UTF-8 code points as characters
 pub fn right<T: OffsetSizeTrait>(args: &[ArrayRef]) -> Result<ArrayRef> {
-    let string_array = as_generic_string_array::<T>(&args[0])?;
     let n_array = as_int64_array(&args[1])?;
+    if args[0].data_type() == &DataType::Utf8View {
+        // string_view_right(args)
+        let string_array = as_string_view_array(&args[0])?;
+        right_impl::<T, _>(&mut string_array.iter(), n_array)
+    } else {
+        // string_right::<T>(args)
+        let string_array = &as_generic_string_array::<T>(&args[0])?;
+        right_impl::<T, _>(&mut string_array.iter(), n_array)
+    }
+}
 
-    let result = string_array
-        .iter()
+// Currently the return type can only be Utf8 or LargeUtf8, to reach fully support, we need
+// to edit the `get_optimal_return_type` in utils.rs to make the udfs be able to return Utf8View
+// See https://github.com/apache/datafusion/issues/11790#issuecomment-2283777166
+fn right_impl<'a, T: OffsetSizeTrait, V: ArrayAccessor<Item = &'a str>>(
+    string_array_iter: &mut ArrayIter<V>,
+    n_array: &Int64Array,
+) -> Result<ArrayRef> {
+    let result = string_array_iter
         .zip(n_array.iter())
         .map(|(string, n)| match (string, n) {
             (Some(string), Some(n)) => match n.cmp(&0) {

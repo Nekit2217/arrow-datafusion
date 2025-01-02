@@ -21,6 +21,8 @@ use ahash::RandomState;
 use datafusion_expr::utils::AggregateOrderSensitivity;
 use std::any::Any;
 use std::collections::HashSet;
+use std::mem::{size_of, size_of_val};
+use std::sync::OnceLock;
 
 use arrow::array::Array;
 use arrow::array::ArrowNativeTypeOp;
@@ -33,14 +35,16 @@ use arrow::datatypes::{
 };
 use arrow::{array::ArrayRef, datatypes::Field};
 use datafusion_common::{exec_err, not_impl_err, Result, ScalarValue};
+use datafusion_expr::aggregate_doc_sections::DOC_SECTION_GENERAL;
 use datafusion_expr::function::AccumulatorArgs;
 use datafusion_expr::function::StateFieldsArgs;
 use datafusion_expr::utils::format_state_name;
 use datafusion_expr::{
-    Accumulator, AggregateUDFImpl, GroupsAccumulator, ReversedUDAF, Signature, Volatility,
+    Accumulator, AggregateUDFImpl, Documentation, GroupsAccumulator, ReversedUDAF,
+    Signature, Volatility,
 };
-use datafusion_physical_expr_common::aggregate::groups_accumulator::prim_op::PrimitiveGroupsAccumulator;
-use datafusion_physical_expr_common::aggregate::utils::Hashable;
+use datafusion_functions_aggregate_common::aggregate::groups_accumulator::prim_op::PrimitiveGroupsAccumulator;
+use datafusion_functions_aggregate_common::utils::Hashable;
 
 make_udaf_expr_and_func!(
     Sum,
@@ -58,14 +62,18 @@ make_udaf_expr_and_func!(
 /// `helper` is a macro accepting (ArrowPrimitiveType, DataType)
 macro_rules! downcast_sum {
     ($args:ident, $helper:ident) => {
-        match $args.data_type {
-            DataType::UInt64 => $helper!(UInt64Type, $args.data_type),
-            DataType::Int64 => $helper!(Int64Type, $args.data_type),
-            DataType::Float64 => $helper!(Float64Type, $args.data_type),
-            DataType::Decimal128(_, _) => $helper!(Decimal128Type, $args.data_type),
-            DataType::Decimal256(_, _) => $helper!(Decimal256Type, $args.data_type),
+        match $args.return_type {
+            DataType::UInt64 => $helper!(UInt64Type, $args.return_type),
+            DataType::Int64 => $helper!(Int64Type, $args.return_type),
+            DataType::Float64 => $helper!(Float64Type, $args.return_type),
+            DataType::Decimal128(_, _) => $helper!(Decimal128Type, $args.return_type),
+            DataType::Decimal256(_, _) => $helper!(Decimal256Type, $args.return_type),
             _ => {
-                not_impl_err!("Sum not supported for {}: {}", $args.name, $args.data_type)
+                not_impl_err!(
+                    "Sum not supported for {}: {}",
+                    $args.name,
+                    $args.return_type
+                )
             }
         }
     };
@@ -229,6 +237,34 @@ impl AggregateUDFImpl for Sum {
     fn order_sensitivity(&self) -> AggregateOrderSensitivity {
         AggregateOrderSensitivity::Insensitive
     }
+
+    fn documentation(&self) -> Option<&Documentation> {
+        Some(get_sum_doc())
+    }
+}
+
+static DOCUMENTATION: OnceLock<Documentation> = OnceLock::new();
+
+fn get_sum_doc() -> &'static Documentation {
+    DOCUMENTATION.get_or_init(|| {
+        Documentation::builder()
+            .with_doc_section(DOC_SECTION_GENERAL)
+            .with_description("Returns the sum of all values in the specified column.")
+            .with_syntax_example("sum(expression)")
+            .with_sql_example(
+                r#"```sql
+> SELECT sum(column_name) FROM table_name;
++-----------------------+
+| sum(column_name)       |
++-----------------------+
+| 12345                 |
++-----------------------+
+```"#,
+            )
+            .with_standard_argument("expression", None)
+            .build()
+            .unwrap()
+    })
 }
 
 /// This accumulator computes SUM incrementally
@@ -275,7 +311,7 @@ impl<T: ArrowNumericType> Accumulator for SumAccumulator<T> {
     }
 
     fn size(&self) -> usize {
-        std::mem::size_of_val(self)
+        size_of_val(self)
     }
 }
 
@@ -335,7 +371,7 @@ impl<T: ArrowNumericType> Accumulator for SlidingSumAccumulator<T> {
     }
 
     fn size(&self) -> usize {
-        std::mem::size_of_val(self)
+        size_of_val(self)
     }
 
     fn retract_batch(&mut self, values: &[ArrayRef]) -> Result<()> {
@@ -429,7 +465,6 @@ impl<T: ArrowPrimitiveType> Accumulator for DistinctSumAccumulator<T> {
     }
 
     fn size(&self) -> usize {
-        std::mem::size_of_val(self)
-            + self.values.capacity() * std::mem::size_of::<T::Native>()
+        size_of_val(self) + self.values.capacity() * size_of::<T::Native>()
     }
 }

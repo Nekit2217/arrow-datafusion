@@ -31,13 +31,17 @@ use datafusion_common::ScalarValue;
 use datafusion_common::{
     downcast_value, internal_err, not_impl_err, DataFusionError, Result,
 };
+use datafusion_expr::aggregate_doc_sections::DOC_SECTION_APPROXIMATE;
 use datafusion_expr::function::{AccumulatorArgs, StateFieldsArgs};
 use datafusion_expr::utils::format_state_name;
-use datafusion_expr::{Accumulator, AggregateUDFImpl, Signature, Volatility};
+use datafusion_expr::{
+    Accumulator, AggregateUDFImpl, Documentation, Signature, Volatility,
+};
 use std::any::Any;
 use std::fmt::{Debug, Formatter};
 use std::hash::Hash;
 use std::marker::PhantomData;
+use std::sync::OnceLock;
 make_udaf_expr_and_func!(
     ApproxDistinct,
     approx_distinct,
@@ -277,7 +281,9 @@ impl AggregateUDFImpl for ApproxDistinct {
     }
 
     fn accumulator(&self, acc_args: AccumulatorArgs) -> Result<Box<dyn Accumulator>> {
-        let accumulator: Box<dyn Accumulator> = match &acc_args.input_types[0] {
+        let data_type = acc_args.exprs[0].data_type(acc_args.schema)?;
+
+        let accumulator: Box<dyn Accumulator> = match data_type {
             // TODO u8, i8, u16, i16 shall really be done using bitmap, not HLL
             // TODO support for boolean (trivial case)
             // https://github.com/apache/datafusion/issues/1109
@@ -301,4 +307,33 @@ impl AggregateUDFImpl for ApproxDistinct {
         };
         Ok(accumulator)
     }
+
+    fn documentation(&self) -> Option<&Documentation> {
+        Some(get_approx_distinct_doc())
+    }
+}
+
+static DOCUMENTATION: OnceLock<Documentation> = OnceLock::new();
+
+fn get_approx_distinct_doc() -> &'static Documentation {
+    DOCUMENTATION.get_or_init(|| {
+        Documentation::builder()
+            .with_doc_section(DOC_SECTION_APPROXIMATE)
+            .with_description(
+                "Returns the approximate number of distinct input values calculated using the HyperLogLog algorithm.",
+            )
+            .with_syntax_example("approx_distinct(expression)")
+            .with_sql_example(r#"```sql
+> SELECT approx_distinct(column_name) FROM table_name;
++-----------------------------------+
+| approx_distinct(column_name)      |
++-----------------------------------+
+| 42                                |
++-----------------------------------+
+```"#, 
+            )
+            .with_standard_argument("expression", None)
+            .build()
+            .unwrap()
+    })
 }

@@ -39,6 +39,7 @@ path = "src/lib.rs"
 ahash = { workspace = true }
 arrow = { workspace = true }
 datafusion-common = { workspace = true, default-features = true }
-datafusion-expr = { workspace = true }
+datafusion-expr-common = { workspace = true }
 hashbrown = { workspace = true }
+itertools = { workspace = true }
 rand = { workspace = true }

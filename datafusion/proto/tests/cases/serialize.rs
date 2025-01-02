@@ -238,7 +238,7 @@ fn context_with_udf() -> SessionContext {
     let udf = create_udf(
         "dummy",
         vec![DataType::Utf8],
-        Arc::new(DataType::Utf8),
+        DataType::Utf8,
         Volatility::Immutable,
         scalar_fn,
     );
@@ -276,7 +276,7 @@ fn test_expression_serialization_roundtrip() {
     /// Extracts the first part of a function name
     /// 'foo(bar)' -> 'foo'
     fn extract_function_name(expr: &Expr) -> String {
-        let name = expr.display_name().unwrap();
+        let name = expr.schema_name().to_string();
         name.split('(').next().unwrap().to_string()
     }
 }

@@ -23,12 +23,12 @@ use datafusion_common::{Result, ScalarValue};
 use datafusion_expr::JoinType::Inner;
 use datafusion_expr::{
     logical_plan::{EmptyRelation, LogicalPlan},
-    CrossJoin, Expr,
+    Expr,
 };
 
 /// Eliminates joins when join condition is false.
 /// Replaces joins when inner join condition is true with a cross join.
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct EliminateJoin;
 
 impl EliminateJoin {
@@ -54,13 +54,6 @@ impl OptimizerRule for EliminateJoin {
         match plan {
             LogicalPlan::Join(join) if join.join_type == Inner && join.on.is_empty() => {
                 match join.filter {
-                    Some(Expr::Literal(ScalarValue::Boolean(Some(true)))) => {
-                        Ok(Transformed::yes(LogicalPlan::CrossJoin(CrossJoin {
-                            left: join.left,
-                            right: join.right,
-                            schema: join.schema,
-                        })))
-                    }
                     Some(Expr::Literal(ScalarValue::Boolean(Some(false)))) => Ok(
                         Transformed::yes(LogicalPlan::EmptyRelation(EmptyRelation {
                             produce_one_row: false,
@@ -83,9 +76,9 @@ impl OptimizerRule for EliminateJoin {
 mod tests {
     use crate::eliminate_join::EliminateJoin;
     use crate::test::*;
-    use datafusion_common::{Result, ScalarValue};
+    use datafusion_common::Result;
     use datafusion_expr::JoinType::Inner;
-    use datafusion_expr::{logical_plan::builder::LogicalPlanBuilder, Expr, LogicalPlan};
+    use datafusion_expr::{lit, logical_plan::builder::LogicalPlanBuilder, LogicalPlan};
     use std::sync::Arc;
 
     fn assert_optimized_plan_equal(plan: LogicalPlan, expected: &str) -> Result<()> {
@@ -98,28 +91,11 @@ mod tests {
             .join_on(
                 LogicalPlanBuilder::empty(false).build()?,
                 Inner,
-                Some(Expr::Literal(ScalarValue::Boolean(Some(false)))),
+                Some(lit(false)),
             )?
             .build()?;
 
         let expected = "EmptyRelation";
-        assert_optimized_plan_equal(plan, expected)
-    }
-
-    #[test]
-    fn join_on_true() -> Result<()> {
-        let plan = LogicalPlanBuilder::empty(false)
-            .join_on(
-                LogicalPlanBuilder::empty(false).build()?,
-                Inner,
-                Some(Expr::Literal(ScalarValue::Boolean(Some(true)))),
-            )?
-            .build()?;
-
-        let expected = "\
-        CrossJoin:\
-        \n  EmptyRelation\
-        \n  EmptyRelation";
         assert_optimized_plan_equal(plan, expected)
     }
 }

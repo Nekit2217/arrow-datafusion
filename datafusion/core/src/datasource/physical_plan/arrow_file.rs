@@ -31,6 +31,7 @@ use crate::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, SendableRecordBatchStream,
 };
 
+use arrow::buffer::Buffer;
 use arrow_ipc::reader::FileDecoder;
 use arrow_schema::SchemaRef;
 use datafusion_common::config::ConfigOptions;
@@ -196,6 +197,10 @@ impl ExecutionPlan for ArrowExec {
         Ok(self.projected_statistics.clone())
     }
 
+    fn fetch(&self) -> Option<usize> {
+        self.base_config.limit
+    }
+
     fn with_fetch(&self, limit: Option<usize>) -> Option<Arc<dyn ExecutionPlan>> {
         let new_config = self.base_config.clone().with_limit(limit);
 
@@ -296,7 +301,10 @@ impl FileOpener for ArrowOpener {
                     for (dict_block, dict_result) in
                         footer.dictionaries().iter().flatten().zip(dict_results)
                     {
-                        decoder.read_dictionary(dict_block, &dict_result.into())?;
+                        decoder.read_dictionary(
+                            dict_block,
+                            &Buffer::from_bytes(dict_result.into()),
+                        )?;
                     }
 
                     // filter recordbatches according to range
@@ -332,7 +340,10 @@ impl FileOpener for ArrowOpener {
                             .zip(recordbatch_results)
                             .filter_map(move |(block, data)| {
                                 decoder
-                                    .read_record_batch(&block, &data.into())
+                                    .read_record_batch(
+                                        &block,
+                                        &Buffer::from_bytes(data.into()),
+                                    )
                                     .transpose()
                             }),
                     )

@@ -15,9 +15,9 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use crate::datasource::object_store::ObjectStoreUrl;
 use crate::execution::context::SessionState;
 use datafusion_common::{DataFusionError, Result};
+use datafusion_execution::object_store::ObjectStoreUrl;
 use datafusion_optimizer::OptimizerConfig;
 use futures::stream::BoxStream;
 use futures::{StreamExt, TryStreamExt};
@@ -188,6 +188,19 @@ impl ListingTableUrl {
     /// Returns `true` if `path` refers to a collection of objects
     pub fn is_collection(&self) -> bool {
         self.url.path().ends_with(DELIMITER)
+    }
+
+    /// Returns the file extension of the last path segment if it exists
+    pub fn file_extension(&self) -> Option<&str> {
+        if let Some(segments) = self.url.path_segments() {
+            if let Some(last_segment) = segments.last() {
+                if last_segment.contains(".") && !last_segment.ends_with(".") {
+                    return last_segment.split('.').last();
+                }
+            }
+        }
+
+        None
     }
 
     /// Strips the prefix of this [`ListingTableUrl`] from the provided path, returning
@@ -491,6 +504,56 @@ mod tests {
             "https://a.b.c/path#a=b/",
             false,
             "path not ends with / - fragment ends with / - not collection",
+        );
+    }
+
+    #[test]
+    fn test_file_extension() {
+        fn test(input: &str, expected: Option<&str>, message: &str) {
+            let url = ListingTableUrl::parse(input).unwrap();
+            assert_eq!(url.file_extension(), expected, "{message}");
+        }
+
+        test("https://a.b.c/path/", None, "path ends with / - not a file");
+        test(
+            "https://a.b.c/path/?a=b",
+            None,
+            "path ends with / - with query args - not a file",
+        );
+        test(
+            "https://a.b.c/path?a=b/",
+            None,
+            "path not ends with / - query ends with / but no file extension",
+        );
+        test(
+            "https://a.b.c/path/#a=b",
+            None,
+            "path ends with / - with fragment - not a file",
+        );
+        test(
+            "https://a.b.c/path#a=b/",
+            None,
+            "path not ends with / - fragment ends with / but no file extension",
+        );
+        test(
+            "file///some/path/",
+            None,
+            "file path ends with / - not a file",
+        );
+        test(
+            "file///some/path/file",
+            None,
+            "file path does not end with - no extension",
+        );
+        test(
+            "file///some/path/file.",
+            None,
+            "file path ends with . - no value after .",
+        );
+        test(
+            "file///some/path/file.ext",
+            Some("ext"),
+            "file path ends with .ext - extension is ext",
         );
     }
 }

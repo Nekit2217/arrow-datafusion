@@ -18,28 +18,37 @@
 //! Defines `Avg` & `Mean` aggregate & accumulators
 
 use arrow::array::{
-    self, Array, ArrayRef, ArrowNativeTypeOp, ArrowNumericType, ArrowPrimitiveType,
-    AsArray, PrimitiveArray, PrimitiveBuilder, UInt64Array,
+    Array, ArrayRef, ArrowNativeTypeOp, ArrowNumericType, ArrowPrimitiveType, AsArray,
+    BooleanArray, PrimitiveArray, PrimitiveBuilder, UInt64Array,
 };
+
 use arrow::compute::sum;
 use arrow::datatypes::{
     i256, ArrowNativeType, DataType, Decimal128Type, Decimal256Type, DecimalType, Field,
     Float64Type, UInt64Type,
 };
 use datafusion_common::{exec_err, not_impl_err, Result, ScalarValue};
+use datafusion_expr::aggregate_doc_sections::DOC_SECTION_GENERAL;
 use datafusion_expr::function::{AccumulatorArgs, StateFieldsArgs};
 use datafusion_expr::type_coercion::aggregates::{avg_return_type, coerce_avg_type};
 use datafusion_expr::utils::format_state_name;
 use datafusion_expr::Volatility::Immutable;
 use datafusion_expr::{
-    Accumulator, AggregateUDFImpl, EmitTo, GroupsAccumulator, ReversedUDAF, Signature,
+    Accumulator, AggregateUDFImpl, Documentation, EmitTo, GroupsAccumulator,
+    ReversedUDAF, Signature,
 };
-use datafusion_physical_expr_common::aggregate::groups_accumulator::accumulate::NullState;
-use datafusion_physical_expr_common::aggregate::utils::DecimalAverager;
+
+use datafusion_functions_aggregate_common::aggregate::groups_accumulator::accumulate::NullState;
+use datafusion_functions_aggregate_common::aggregate::groups_accumulator::nulls::{
+    filtered_null_mask, set_nulls,
+};
+
+use datafusion_functions_aggregate_common::utils::DecimalAverager;
 use log::debug;
 use std::any::Any;
 use std::fmt::Debug;
-use std::sync::Arc;
+use std::mem::{size_of, size_of_val};
+use std::sync::{Arc, OnceLock};
 
 make_udaf_expr_and_func!(
     Avg,
@@ -92,8 +101,10 @@ impl AggregateUDFImpl for Avg {
             return exec_err!("avg(DISTINCT) aggregations are not available");
         }
         use DataType::*;
+
+        let data_type = acc_args.exprs[0].data_type(acc_args.schema)?;
         // instantiate specialized accumulator based for the type
-        match (&acc_args.input_types[0], acc_args.data_type) {
+        match (&data_type, acc_args.return_type) {
             (Float64, Float64) => Ok(Box::<AvgAccumulator>::default()),
             (
                 Decimal128(sum_precision, sum_scale),
@@ -120,8 +131,8 @@ impl AggregateUDFImpl for Avg {
             })),
             _ => exec_err!(
                 "AvgAccumulator for ({} --> {})",
-                &acc_args.input_types[0],
-                acc_args.data_type
+                &data_type,
+                acc_args.return_type
             ),
         }
     }
@@ -143,7 +154,7 @@ impl AggregateUDFImpl for Avg {
 
     fn groups_accumulator_supported(&self, args: AccumulatorArgs) -> bool {
         matches!(
-            args.data_type,
+            args.return_type,
             DataType::Float64 | DataType::Decimal128(_, _)
         )
     }
@@ -153,12 +164,14 @@ impl AggregateUDFImpl for Avg {
         args: AccumulatorArgs,
     ) -> Result<Box<dyn GroupsAccumulator>> {
         use DataType::*;
+
+        let data_type = args.exprs[0].data_type(args.schema)?;
         // instantiate specialized accumulator based for the type
-        match (&args.input_types[0], args.data_type) {
+        match (&data_type, args.return_type) {
             (Float64, Float64) => {
                 Ok(Box::new(AvgGroupsAccumulator::<Float64Type, _>::new(
-                    &args.input_types[0],
-                    args.data_type,
+                    &data_type,
+                    args.return_type,
                     |sum: f64, count: u64| Ok(sum / count as f64),
                 )))
             }
@@ -176,8 +189,8 @@ impl AggregateUDFImpl for Avg {
                     move |sum: i128, count: u64| decimal_averager.avg(sum, count as i128);
 
                 Ok(Box::new(AvgGroupsAccumulator::<Decimal128Type, _>::new(
-                    &args.input_types[0],
-                    args.data_type,
+                    &data_type,
+                    args.return_type,
                     avg_fn,
                 )))
             }
@@ -197,16 +210,16 @@ impl AggregateUDFImpl for Avg {
                 };
 
                 Ok(Box::new(AvgGroupsAccumulator::<Decimal256Type, _>::new(
-                    &args.input_types[0],
-                    args.data_type,
+                    &data_type,
+                    args.return_type,
                     avg_fn,
                 )))
             }
 
             _ => not_impl_err!(
                 "AvgGroupsAccumulator for ({} --> {})",
-                &args.input_types[0],
-                args.data_type
+                &data_type,
+                args.return_type
             ),
         }
     }
@@ -225,6 +238,36 @@ impl AggregateUDFImpl for Avg {
         }
         coerce_avg_type(self.name(), arg_types)
     }
+
+    fn documentation(&self) -> Option<&Documentation> {
+        Some(get_avg_doc())
+    }
+}
+
+static DOCUMENTATION: OnceLock<Documentation> = OnceLock::new();
+
+fn get_avg_doc() -> &'static Documentation {
+    DOCUMENTATION.get_or_init(|| {
+        Documentation::builder()
+            .with_doc_section(DOC_SECTION_GENERAL)
+            .with_description(
+                "Returns the average of numeric values in the specified column.",
+            )
+            .with_syntax_example("avg(expression)")
+            .with_sql_example(
+                r#"```sql
+> SELECT avg(column_name) FROM table_name;
++---------------------------+
+| avg(column_name)           |
++---------------------------+
+| 42.75                      |
++---------------------------+
+```"#,
+            )
+            .with_standard_argument("expression", None)
+            .build()
+            .unwrap()
+    })
 }
 
 /// An accumulator to compute the average
@@ -252,7 +295,7 @@ impl Accumulator for AvgAccumulator {
     }
 
     fn size(&self) -> usize {
-        std::mem::size_of_val(self)
+        size_of_val(self)
     }
 
     fn state(&mut self) -> Result<Vec<ScalarValue>> {
@@ -330,7 +373,7 @@ impl<T: DecimalType + ArrowNumericType + Debug> Accumulator for DecimalAvgAccumu
     }
 
     fn size(&self) -> usize {
-        std::mem::size_of_val(self)
+        size_of_val(self)
     }
 
     fn state(&mut self) -> Result<Vec<ScalarValue>> {
@@ -429,7 +472,7 @@ where
         &mut self,
         values: &[ArrayRef],
         group_indices: &[usize],
-        opt_filter: Option<&array::BooleanArray>,
+        opt_filter: Option<&BooleanArray>,
         total_num_groups: usize,
     ) -> Result<()> {
         assert_eq!(values.len(), 1, "single argument to update_batch");
@@ -512,7 +555,7 @@ where
         &mut self,
         values: &[ArrayRef],
         group_indices: &[usize],
-        opt_filter: Option<&array::BooleanArray>,
+        opt_filter: Option<&BooleanArray>,
         total_num_groups: usize,
     ) -> Result<()> {
         assert_eq!(values.len(), 2, "two arguments to merge_batch");
@@ -547,8 +590,31 @@ where
         Ok(())
     }
 
+    fn convert_to_state(
+        &self,
+        values: &[ArrayRef],
+        opt_filter: Option<&BooleanArray>,
+    ) -> Result<Vec<ArrayRef>> {
+        let sums = values[0]
+            .as_primitive::<T>()
+            .clone()
+            .with_data_type(self.sum_data_type.clone());
+        let counts = UInt64Array::from_value(1, sums.len());
+
+        let nulls = filtered_null_mask(opt_filter, &sums);
+
+        // set nulls on the arrays
+        let counts = set_nulls(counts, nulls.clone());
+        let sums = set_nulls(sums, nulls);
+
+        Ok(vec![Arc::new(counts) as ArrayRef, Arc::new(sums)])
+    }
+
+    fn supports_convert_to_state(&self) -> bool {
+        true
+    }
+
     fn size(&self) -> usize {
-        self.counts.capacity() * std::mem::size_of::<u64>()
-            + self.sums.capacity() * std::mem::size_of::<T>()
+        self.counts.capacity() * size_of::<u64>() + self.sums.capacity() * size_of::<T>()
     }
 }

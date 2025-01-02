@@ -16,19 +16,16 @@
 // under the License.
 
 use std::any::Any;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
-use arrow::array::{ArrayRef, OffsetSizeTrait};
+use arrow::array::ArrayRef;
 use arrow::datatypes::DataType;
-use arrow::datatypes::DataType::Boolean;
-
-use datafusion_common::cast::as_generic_string_array;
-use datafusion_common::{exec_err, Result};
-use datafusion_expr::TypeSignature::*;
-use datafusion_expr::{ColumnarValue, Volatility};
-use datafusion_expr::{ScalarUDFImpl, Signature};
 
 use crate::utils::make_scalar_function;
+use datafusion_common::{internal_err, Result};
+use datafusion_expr::scalar_doc_sections::DOC_SECTION_STRING;
+use datafusion_expr::{ColumnarValue, Documentation, Volatility};
+use datafusion_expr::{ScalarUDFImpl, Signature};
 
 #[derive(Debug)]
 pub struct EndsWithFunc {
@@ -43,17 +40,8 @@ impl Default for EndsWithFunc {
 
 impl EndsWithFunc {
     pub fn new() -> Self {
-        use DataType::*;
         Self {
-            signature: Signature::one_of(
-                vec![
-                    Exact(vec![Utf8, Utf8]),
-                    Exact(vec![Utf8, LargeUtf8]),
-                    Exact(vec![LargeUtf8, Utf8]),
-                    Exact(vec![LargeUtf8, LargeUtf8]),
-                ],
-                Volatility::Immutable,
-            ),
+            signature: Signature::string(2, Volatility::Immutable),
         }
     }
 }
@@ -72,27 +60,60 @@ impl ScalarUDFImpl for EndsWithFunc {
     }
 
     fn return_type(&self, _arg_types: &[DataType]) -> Result<DataType> {
-        Ok(Boolean)
+        Ok(DataType::Boolean)
     }
 
     fn invoke(&self, args: &[ColumnarValue]) -> Result<ColumnarValue> {
         match args[0].data_type() {
-            DataType::Utf8 => make_scalar_function(ends_with::<i32>, vec![])(args),
-            DataType::LargeUtf8 => make_scalar_function(ends_with::<i64>, vec![])(args),
+            DataType::Utf8View | DataType::Utf8 | DataType::LargeUtf8 => {
+                make_scalar_function(ends_with, vec![])(args)
+            }
             other => {
-                exec_err!("Unsupported data type {other:?} for function ends_with")
+                internal_err!("Unsupported data type {other:?} for function ends_with. Expected Utf8, LargeUtf8 or Utf8View")?
             }
         }
     }
+
+    fn documentation(&self) -> Option<&Documentation> {
+        Some(get_ends_with_doc())
+    }
+}
+
+static DOCUMENTATION: OnceLock<Documentation> = OnceLock::new();
+
+fn get_ends_with_doc() -> &'static Documentation {
+    DOCUMENTATION.get_or_init(|| {
+        Documentation::builder()
+            .with_doc_section(DOC_SECTION_STRING)
+            .with_description("Tests if a string ends with a substring.")
+            .with_syntax_example("ends_with(str, substr)")
+            .with_sql_example(
+                r#"```sql
+>  select ends_with('datafusion', 'soin');
++--------------------------------------------+
+| ends_with(Utf8("datafusion"),Utf8("soin")) |
++--------------------------------------------+
+| false                                      |
++--------------------------------------------+
+> select ends_with('datafusion', 'sion');
++--------------------------------------------+
+| ends_with(Utf8("datafusion"),Utf8("sion")) |
++--------------------------------------------+
+| true                                       |
++--------------------------------------------+
+```"#,
+            )
+            .with_standard_argument("str", Some("String"))
+            .with_argument("substr", "Substring to test for.")
+            .build()
+            .unwrap()
+    })
 }
 
 /// Returns true if string ends with suffix.
 /// ends_with('alphabet', 'abet') = 't'
-pub fn ends_with<T: OffsetSizeTrait>(args: &[ArrayRef]) -> Result<ArrayRef> {
-    let left = as_generic_string_array::<T>(&args[0])?;
-    let right = as_generic_string_array::<T>(&args[1])?;
-
-    let result = arrow::compute::kernels::comparison::ends_with(left, right)?;
+pub fn ends_with(args: &[ArrayRef]) -> Result<ArrayRef> {
+    let result = arrow::compute::kernels::comparison::ends_with(&args[0], &args[1])?;
 
     Ok(Arc::new(result) as ArrayRef)
 }

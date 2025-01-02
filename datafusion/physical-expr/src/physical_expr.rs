@@ -17,10 +17,8 @@
 
 use std::sync::Arc;
 
-use datafusion_physical_expr_common::physical_expr::PhysicalExpr;
+pub(crate) use datafusion_physical_expr_common::physical_expr::PhysicalExpr;
 use itertools::izip;
-
-pub use datafusion_physical_expr_common::physical_expr::down_cast_any_ref;
 
 /// Shared [`PhysicalExpr`].
 pub type PhysicalExprRef = Arc<dyn PhysicalExpr>;
