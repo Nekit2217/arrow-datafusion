@@ -30,6 +30,7 @@ members = [
     "datafusion/functions",
     "datafusion/functions-aggregate",
     "datafusion/functions-aggregate-common",
+    "datafusion/functions-table",
     "datafusion/functions-nested",
     "datafusion/functions-window",
     "datafusion/functions-window-common",
@@ -47,8 +48,13 @@ members = [
     "datafusion/substrait",
     "datafusion/wasmtest",
     "datafusion-examples",
+    "datafusion-examples/examples/ffi/ffi_example_table_provider",
+    "datafusion-examples/examples/ffi/ffi_module_interface",
+    "datafusion-examples/examples/ffi/ffi_module_loader",
     "test-utils",
     "benchmarks",
+    "datafusion/macros",
+    "datafusion/doc",
 ]
 resolver = "2"
 
@@ -59,72 +65,97 @@ homepage = "https://datafusion.apache.org"
 license = "Apache-2.0"
 readme = "README.md"
 repository = "https://github.com/apache/datafusion"
-rust-version = "1.79"
-version = "43.0.0"
+rust-version = "1.80.1"
+version = "44.0.0"
 
 [workspace.dependencies]
 # We turn off default-features for some dependencies here so the workspaces which inherit them can
 # selectively turn them on if needed, since we can override default-features = true (from false)
 # for the inherited dependency but cannot do the reverse (override from true to false).
 #
-# See for more detaiils: https://github.com/rust-lang/cargo/issues/11329
+# See for more details: https://github.com/rust-lang/cargo/issues/11329
 ahash = { version = "0.8", default-features = false, features = [
     "runtime-rng",
 ] }
-arrow = { version = "53.2.0", features = [
-arrow = { git="https://github.com/Nekit2217/arrow-rs", branch="bm-master", features = [
+
+arrow = { path="../arrow-rs/arrow", features = [
     "prettyprint",
 ] }
-arrow-array = { version = "53.2.0", default-features = false, features = [
-arrow-array = { git="https://github.com/Nekit2217/arrow-rs", branch="bm-master", default-features = false, features = [
+arrow-array = { path="../arrow-rs/arrow-array", default-features = false, features = [
     "chrono-tz",
 ] }
-arrow-buffer = { version = "53.2.0", default-features = false }
-arrow-flight = { version = "53.2.0", features = [
-arrow-buffer = { git="https://github.com/Nekit2217/arrow-rs", branch="bm-master", default-features = false }
-arrow-flight = { git="https://github.com/Nekit2217/arrow-rs", branch="bm-master", features = [
+arrow-buffer = { path="../arrow-rs/arrow-buffer", default-features = false }
+arrow-flight = { path="../arrow-rs/arrow-flight", features = [
     "flight-sql-experimental",
 ] }
-arrow-ipc = { version = "53.2.0", default-features = false, features = [
-arrow-ipc = { git="https://github.com/Nekit2217/arrow-rs", branch="bm-master", default-features = false, features = [
+arrow-ipc = { path="../arrow-rs/arrow-ipc", default-features = false, features = [
     "lz4",
 ] }
-arrow-ord = { version = "53.2.0", default-features = false }
-arrow-schema = { version = "53.2.0", default-features = false }
-arrow-string = { version = "53.2.0", default-features = false }
-arrow-ord = { git="https://github.com/Nekit2217/arrow-rs", branch="bm-master", default-features = false }
-arrow-schema = { git="https://github.com/Nekit2217/arrow-rs", branch="bm-master", default-features = false }
-arrow-string = { git="https://github.com/Nekit2217/arrow-rs", branch="bm-master", default-features = false }
+arrow-ord = { path="../arrow-rs/arrow-ord",  default-features = false }
+arrow-schema = { path="../arrow-rs/arrow-schema",  default-features = false }
+arrow-string = { path="../arrow-rs/arrow-string",  default-features = false }
+object_store = { path="../arrow-rs/object_store", default-features = false }
+parquet = { path="../arrow-rs/parquet", default-features = false, features = [
+    "arrow",
+    "async",
+    "object_store",
+] }
+
+#arrow = { git="https://github.com/Nekit2217/arrow-rs", branch="bm-master", features = [
+#    "prettyprint",
+#] }
+#arrow-array = { git="https://github.com/Nekit2217/arrow-rs", branch="bm-master", default-features = false, features = [
+#    "chrono-tz",
+#] }
+#arrow-buffer = { git="https://github.com/Nekit2217/arrow-rs", branch="bm-master", default-features = false }
+#arrow-flight = { git="https://github.com/Nekit2217/arrow-rs", branch="bm-master", features = [
+#    "flight-sql-experimental",
+#] }
+#arrow-ipc = { git="https://github.com/Nekit2217/arrow-rs", branch="bm-master", default-features = false, features = [
+#    "lz4",
+#] }
+#arrow-ord = { git="https://github.com/Nekit2217/arrow-rs", branch="bm-master",  default-features = false }
+#arrow-schema = { git="https://github.com/Nekit2217/arrow-rs", branch="bm-master",  default-features = false }
+#arrow-string = { git="https://github.com/Nekit2217/arrow-rs", branch="bm-master",  default-features = false }
+#object_store = { git="https://github.com/Nekit2217/arrow-rs", branch="bm-master", default-features = false }
+#parquet = { git="https://github.com/Nekit2217/arrow-rs", branch="bm-master", default-features = false, features = [
+#    "arrow",
+#    "async",
+#    "object_store",
+#] }
+
+
 async-trait = "0.1.73"
-bigdecimal = "=0.4.1"
+bigdecimal = "0.4.7"
 bytes = "1.4"
 chrono = { version = "0.4.38", default-features = false }
 ctor = "0.2.0"
 dashmap = "6.0.1"
-datafusion = { path = "datafusion/core", version = "43.0.0", default-features = false }
-datafusion-catalog = { path = "datafusion/catalog", version = "43.0.0" }
-datafusion-common = { path = "datafusion/common", version = "43.0.0", default-features = false }
-datafusion-common-runtime = { path = "datafusion/common-runtime", version = "43.0.0" }
-datafusion-execution = { path = "datafusion/execution", version = "43.0.0" }
-datafusion-expr = { path = "datafusion/expr", version = "43.0.0" }
-datafusion-expr-common = { path = "datafusion/expr-common", version = "43.0.0" }
-datafusion-ffi = { path = "datafusion/ffi", version = "43.0.0" }
-datafusion-functions = { path = "datafusion/functions", version = "43.0.0" }
-datafusion-functions-aggregate = { path = "datafusion/functions-aggregate", version = "43.0.0" }
-datafusion-functions-aggregate-common = { path = "datafusion/functions-aggregate-common", version = "43.0.0" }
-datafusion-functions-nested = { path = "datafusion/functions-nested", version = "43.0.0" }
-datafusion-functions-window = { path = "datafusion/functions-window", version = "43.0.0" }
-datafusion-functions-window-common = { path = "datafusion/functions-window-common", version = "43.0.0" }
-datafusion-optimizer = { path = "datafusion/optimizer", version = "43.0.0", default-features = false }
-datafusion-physical-expr = { path = "datafusion/physical-expr", version = "43.0.0", default-features = false }
-datafusion-physical-expr-common = { path = "datafusion/physical-expr-common", version = "43.0.0", default-features = false }
-datafusion-physical-optimizer = { path = "datafusion/physical-optimizer", version = "43.0.0" }
-datafusion-physical-plan = { path = "datafusion/physical-plan", version = "43.0.0" }
-datafusion-proto = { path = "datafusion/proto", version = "43.0.0" }
-datafusion-proto-common = { path = "datafusion/proto-common", version = "43.0.0" }
-datafusion-sql = { path = "datafusion/sql", version = "43.0.0" }
-datafusion-sqllogictest = { path = "datafusion/sqllogictest", version = "43.0.0" }
-datafusion-substrait = { path = "datafusion/substrait", version = "43.0.0" }
+datafusion = { path = "datafusion/core", version = "44.0.0", default-features = false }
+datafusion-catalog = { path = "datafusion/catalog", version = "44.0.0" }
+datafusion-common = { path = "datafusion/common", version = "44.0.0", default-features = false }
+datafusion-common-runtime = { path = "datafusion/common-runtime", version = "44.0.0" }
+datafusion-doc = { path = "datafusion/doc", version = "44.0.0" }
+datafusion-execution = { path = "datafusion/execution", version = "44.0.0" }
+datafusion-expr = { path = "datafusion/expr", version = "44.0.0" }
+datafusion-expr-common = { path = "datafusion/expr-common", version = "44.0.0" }
+datafusion-ffi = { path = "datafusion/ffi", version = "44.0.0" }
+datafusion-functions = { path = "datafusion/functions", version = "44.0.0" }
+datafusion-functions-aggregate = { path = "datafusion/functions-aggregate", version = "44.0.0" }
+datafusion-functions-aggregate-common = { path = "datafusion/functions-aggregate-common", version = "44.0.0" }
+datafusion-functions-nested = { path = "datafusion/functions-nested", version = "44.0.0" }
+datafusion-functions-table = { path = "datafusion/functions-table", version = "44.0.0" }
+datafusion-functions-window = { path = "datafusion/functions-window", version = "44.0.0" }
+datafusion-functions-window-common = { path = "datafusion/functions-window-common", version = "44.0.0" }
+datafusion-macros = { path = "datafusion/macros", version = "44.0.0" }
+datafusion-optimizer = { path = "datafusion/optimizer", version = "44.0.0", default-features = false }
+datafusion-physical-expr = { path = "datafusion/physical-expr", version = "44.0.0", default-features = false }
+datafusion-physical-expr-common = { path = "datafusion/physical-expr-common", version = "44.0.0", default-features = false }
+datafusion-physical-optimizer = { path = "datafusion/physical-optimizer", version = "44.0.0" }
+datafusion-physical-plan = { path = "datafusion/physical-plan", version = "44.0.0" }
+datafusion-proto = { path = "datafusion/proto", version = "44.0.0" }
+datafusion-proto-common = { path = "datafusion/proto-common", version = "44.0.0" }
+datafusion-sql = { path = "datafusion/sql", version = "44.0.0" }
 doc-comment = "0.3"
 env_logger = "0.11"
 futures = "0.3"
@@ -133,27 +164,18 @@ hashbrown = { version = "0.14.5", features = ["raw"] }
 indexmap = "2.0.0"
 itertools = "0.13"
 log = "^0.4"
-num_cpus = "1.13.0"
-object_store = { version = "0.11.0", default-features = false }
-object_store = { git="https://github.com/Nekit2217/arrow-rs", branch="bm-master", default-features = false }
 parking_lot = "0.12"
-parquet = { version = "53.2.0", default-features = false, features = [
-parquet = { git="https://github.com/Nekit2217/arrow-rs", branch="bm-master", default-features = false, features = [
-    "arrow",
-    "async",
-    "object_store",
-] }
 pbjson = { version = "0.7.0" }
 # Should match arrow-flight's version of prost.
 prost = "0.13.1"
 prost-derive = "0.13.1"
 rand = "0.8"
+recursive = "0.1.1"
 regex = "1.8"
 rstest = "0.23.0"
 serde_json = "1"
-sqlparser = { version = "0.51.0", features = ["visitor"] }
+sqlparser = { version = "0.53.0", features = ["visitor"] }
 tempfile = "3"
-thiserror = "1.0.44"
 tokio = { version = "1.36", features = ["macros", "rt", "sync"] }
 url = "2.2"
 

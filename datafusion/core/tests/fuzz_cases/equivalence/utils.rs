@@ -14,7 +14,7 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
-//
+
 use datafusion::physical_plan::expressions::col;
 use datafusion::physical_plan::expressions::Column;
 use datafusion_physical_expr::{ConstExpr, EquivalenceProperties, PhysicalSortExpr};
@@ -184,7 +184,7 @@ fn add_equal_conditions_test() -> Result<()> {
     assert!(eq_groups.contains(&col_a_expr));
     assert!(eq_groups.contains(&col_b_expr));
 
-    // b and c are aliases. Exising equivalence class should expand,
+    // b and c are aliases. Existing equivalence class should expand,
     // however there shouldn't be any new equivalence class
     eq_properties.add_equal_conditions(&col_b_expr, &col_c_expr)?;
     assert_eq!(eq_properties.eq_group().len(), 1);
@@ -581,7 +581,11 @@ impl ScalarUDFImpl for TestScalarUDF {
         Ok(input[0].sort_properties)
     }
 
-    fn invoke(&self, args: &[ColumnarValue]) -> Result<ColumnarValue> {
+    fn invoke_batch(
+        &self,
+        args: &[ColumnarValue],
+        _number_rows: usize,
+    ) -> Result<ColumnarValue> {
         let args = ColumnarValue::values_to_arrays(args)?;
 
         let arr: ArrayRef = match args[0].data_type() {

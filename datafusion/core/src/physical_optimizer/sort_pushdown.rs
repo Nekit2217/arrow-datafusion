@@ -28,6 +28,7 @@ use crate::physical_plan::repartition::RepartitionExec;
 use crate::physical_plan::sorts::sort::SortExec;
 use crate::physical_plan::tree_node::PlanContext;
 use crate::physical_plan::{ExecutionPlan, ExecutionPlanProperties};
+use arrow_schema::SchemaRef;
 
 use datafusion_common::tree_node::{
     ConcreteTreeNode, Transformed, TreeNode, TreeNodeRecursion,
@@ -38,6 +39,8 @@ use datafusion_physical_expr::expressions::Column;
 use datafusion_physical_expr::utils::collect_columns;
 use datafusion_physical_expr::PhysicalSortRequirement;
 use datafusion_physical_expr_common::sort_expr::{LexOrdering, LexRequirement};
+use datafusion_physical_plan::joins::utils::ColumnIndex;
+use datafusion_physical_plan::joins::HashJoinExec;
 
 /// This is a "data class" we use within the [`EnforceSorting`] rule to push
 /// down [`SortExec`] in the plan. In some cases, we can reduce the total
@@ -94,7 +97,8 @@ fn pushdown_sorts_helper(
     if is_sort(plan) {
         let required_ordering = plan
             .output_ordering()
-            .map(PhysicalSortRequirement::from_sort_exprs)
+            .cloned()
+            .map(LexRequirement::from)
             .unwrap_or_default();
         if !satisfy_parent {
             // Make sure this `SortExec` satisfies parent requirements:
@@ -180,11 +184,12 @@ fn pushdown_requirement_to_children(
             RequirementsCompatibility::NonCompatible => Ok(None),
         }
     } else if let Some(sort_exec) = plan.as_any().downcast_ref::<SortExec>() {
-        let sort_req = PhysicalSortRequirement::from_sort_exprs(
+        let sort_req = LexRequirement::from(
             sort_exec
                 .properties()
                 .output_ordering()
-                .unwrap_or(&LexOrdering::default()),
+                .cloned()
+                .unwrap_or(LexOrdering::default()),
         );
         if sort_exec
             .properties()
@@ -205,10 +210,11 @@ fn pushdown_requirement_to_children(
             .iter()
             .all(|maintain| *maintain)
     {
-        let output_req = PhysicalSortRequirement::from_sort_exprs(
+        let output_req = LexRequirement::from(
             plan.properties()
                 .output_ordering()
-                .unwrap_or(&LexOrdering::default()),
+                .cloned()
+                .unwrap_or(LexOrdering::default()),
         );
         // Push down through operator with fetch when:
         // - requirement is aligned with output ordering
@@ -227,14 +233,12 @@ fn pushdown_requirement_to_children(
     } else if is_union(plan) {
         // UnionExec does not have real sort requirements for its input. Here we change the adjusted_request_ordering to UnionExec's output ordering and
         // propagate the sort requirements down to correct the unnecessary descendant SortExec under the UnionExec
-        let req = (!parent_required.is_empty())
-            .then(|| LexRequirement::new(parent_required.to_vec()));
+        let req = (!parent_required.is_empty()).then(|| parent_required.clone());
         Ok(Some(vec![req; plan.children().len()]))
     } else if let Some(smj) = plan.as_any().downcast_ref::<SortMergeJoinExec>() {
         // If the current plan is SortMergeJoinExec
         let left_columns_len = smj.left().schema().fields().len();
-        let parent_required_expr =
-            PhysicalSortRequirement::to_sort_exprs(parent_required.iter().cloned());
+        let parent_required_expr = LexOrdering::from(parent_required.clone());
         match expr_source_side(
             parent_required_expr.as_ref(),
             smj.join_type(),
@@ -251,8 +255,7 @@ fn pushdown_requirement_to_children(
                     smj.schema().fields.len() - smj.right().schema().fields.len();
                 let new_right_required =
                     shift_right_required(parent_required, right_offset)?;
-                let new_right_required_expr =
-                    PhysicalSortRequirement::to_sort_exprs(new_right_required);
+                let new_right_required_expr = LexOrdering::from(new_right_required);
                 try_pushdown_requirements_to_join(
                     smj,
                     parent_required,
@@ -278,8 +281,7 @@ fn pushdown_requirement_to_children(
         // Pushing down is not beneficial
         Ok(None)
     } else if is_sort_preserving_merge(plan) {
-        let new_ordering =
-            PhysicalSortRequirement::to_sort_exprs(parent_required.to_vec());
+        let new_ordering = LexOrdering::from(parent_required.clone());
         let mut spm_eqs = plan.equivalence_properties().clone();
         // Sort preserving merge will have new ordering, one requirement above is pushed down to its below.
         spm_eqs = spm_eqs.with_reorder(new_ordering);
@@ -295,6 +297,8 @@ fn pushdown_requirement_to_children(
                 .then(|| LexRequirement::new(parent_required.to_vec()));
             Ok(Some(vec![req]))
         }
+    } else if let Some(hash_join) = plan.as_any().downcast_ref::<HashJoinExec>() {
+        handle_hash_join(hash_join, parent_required)
     } else {
         handle_custom_pushdown(plan, parent_required, maintains_input_order)
     }
@@ -412,7 +416,7 @@ fn try_pushdown_requirements_to_join(
     let should_pushdown = smj_eqs.ordering_satisfy_requirement(parent_required);
     Ok(should_pushdown.then(|| {
         let mut required_input_ordering = smj.required_input_ordering();
-        let new_req = Some(PhysicalSortRequirement::from_sort_exprs(sort_expr));
+        let new_req = Some(LexRequirement::from(sort_expr.clone()));
         match push_side {
             JoinSide::Left => {
                 required_input_ordering[0] = new_req;
@@ -572,9 +576,7 @@ fn handle_custom_pushdown(
             .iter()
             .map(|req| {
                 let child_schema = plan.children()[maintained_child_idx].schema();
-                let updated_columns = req
-                    .expr
-                    .clone()
+                let updated_columns = Arc::clone(&req.expr)
                     .transform_up(|expr| {
                         if let Some(col) = expr.as_any().downcast_ref::<Column>() {
                             let new_index = col.index() - sub_offset;
@@ -606,6 +608,102 @@ fn handle_custom_pushdown(
         Ok(Some(result))
     } else {
         Ok(None)
+    }
+}
+
+// For hash join we only maintain the input order for the right child
+// for join type: Inner, Right, RightSemi, RightAnti
+fn handle_hash_join(
+    plan: &HashJoinExec,
+    parent_required: &LexRequirement,
+) -> Result<Option<Vec<Option<LexRequirement>>>> {
+    // If there's no requirement from the parent or the plan has no children
+    // or the join type is not Inner, Right, RightSemi, RightAnti, return early
+    if parent_required.is_empty() || !plan.maintains_input_order()[1] {
+        return Ok(None);
+    }
+
+    // Collect all unique column indices used in the parent-required sorting expression
+    let all_indices: HashSet<usize> = parent_required
+        .iter()
+        .flat_map(|order| {
+            collect_columns(&order.expr)
+                .into_iter()
+                .map(|col| col.index())
+                .collect::<HashSet<_>>()
+        })
+        .collect();
+
+    let column_indices = build_join_column_index(plan);
+    let projected_indices: Vec<_> = if let Some(projection) = &plan.projection {
+        projection.iter().map(|&i| &column_indices[i]).collect()
+    } else {
+        column_indices.iter().collect()
+    };
+    let len_of_left_fields = projected_indices
+        .iter()
+        .filter(|ci| ci.side == JoinSide::Left)
+        .count();
+
+    let all_from_right_child = all_indices.iter().all(|i| *i >= len_of_left_fields);
+
+    // If all columns are from the right child, update the parent requirements
+    if all_from_right_child {
+        // Transform the parent-required expression for the child schema by adjusting columns
+        let updated_parent_req = parent_required
+            .iter()
+            .map(|req| {
+                let child_schema = plan.children()[1].schema();
+                let updated_columns = Arc::clone(&req.expr)
+                    .transform_up(|expr| {
+                        if let Some(col) = expr.as_any().downcast_ref::<Column>() {
+                            let index = projected_indices[col.index()].index;
+                            Ok(Transformed::yes(Arc::new(Column::new(
+                                child_schema.field(index).name(),
+                                index,
+                            ))))
+                        } else {
+                            Ok(Transformed::no(expr))
+                        }
+                    })?
+                    .data;
+                Ok(PhysicalSortRequirement::new(updated_columns, req.options))
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        // Populating with the updated requirements for children that maintain order
+        Ok(Some(vec![
+            None,
+            Some(LexRequirement::new(updated_parent_req)),
+        ]))
+    } else {
+        Ok(None)
+    }
+}
+
+// this function is used to build the column index for the hash join
+// push down sort requirements to the right child
+fn build_join_column_index(plan: &HashJoinExec) -> Vec<ColumnIndex> {
+    let map_fields = |schema: SchemaRef, side: JoinSide| {
+        schema
+            .fields()
+            .iter()
+            .enumerate()
+            .map(|(index, _)| ColumnIndex { index, side })
+            .collect::<Vec<_>>()
+    };
+
+    match plan.join_type() {
+        JoinType::Inner | JoinType::Right => {
+            map_fields(plan.left().schema(), JoinSide::Left)
+                .into_iter()
+                .chain(map_fields(plan.right().schema(), JoinSide::Right))
+                .collect::<Vec<_>>()
+        }
+        JoinType::RightSemi | JoinType::RightAnti => {
+            map_fields(plan.right().schema(), JoinSide::Right)
+        }
+        _ => unreachable!("unexpected join type: {}", plan.join_type()),
     }
 }
 

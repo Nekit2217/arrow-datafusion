@@ -22,7 +22,7 @@ use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::hash::{Hash, Hasher};
 use std::ops::{Deref, Index, Range, RangeFrom, RangeTo};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, LazyLock};
 use std::vec::IntoIter;
 
 use arrow::compute::kernels::sort::{SortColumn, SortOptions};
@@ -251,7 +251,7 @@ pub fn format_physical_sort_requirement_list(
     exprs: &[PhysicalSortRequirement],
 ) -> impl Display + '_ {
     struct DisplayWrapper<'a>(&'a [PhysicalSortRequirement]);
-    impl<'a> Display for DisplayWrapper<'a> {
+    impl Display for DisplayWrapper<'_> {
         fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
             let mut iter = self.0.iter();
             write!(f, "[")?;
@@ -296,26 +296,14 @@ impl PhysicalSortRequirement {
             })
     }
 
-    /// Returns [`PhysicalSortRequirement`] that requires the exact
-    /// sort of the [`PhysicalSortExpr`]s in `ordering`
-    ///
-    /// This method takes `&'a PhysicalSortExpr` to make it easy to
-    /// use implementing [`ExecutionPlan::required_input_ordering`].
-    ///
-    /// [`ExecutionPlan::required_input_ordering`]: https://docs.rs/datafusion/latest/datafusion/physical_plan/trait.ExecutionPlan.html#method.required_input_ordering
+    #[deprecated(since = "43.0.0", note = "use  LexRequirement::from_lex_ordering")]
     pub fn from_sort_exprs<'a>(
         ordering: impl IntoIterator<Item = &'a PhysicalSortExpr>,
     ) -> LexRequirement {
         let ordering = ordering.into_iter().cloned().collect();
         LexRequirement::from_lex_ordering(ordering)
     }
-
-    /// Converts an iterator of [`PhysicalSortRequirement`] into a Vec
-    /// of [`PhysicalSortExpr`]s.
-    ///
-    /// This function converts `PhysicalSortRequirement` to `PhysicalSortExpr`
-    /// for each entry in the input. If required ordering is None for an entry
-    /// default ordering `ASC, NULLS LAST` if given (see the `PhysicalSortExpr::from`).
+    #[deprecated(since = "43.0.0", note = "use  LexOrdering::from_lex_requirement")]
     pub fn to_sort_exprs(
         requirements: impl IntoIterator<Item = PhysicalSortRequirement>,
     ) -> LexOrdering {
@@ -348,8 +336,6 @@ impl AsRef<LexOrdering> for LexOrdering {
     }
 }
 
-static EMPTY_ORDER: OnceLock<LexOrdering> = OnceLock::new();
-
 impl LexOrdering {
     // Creates a new [`LexOrdering`] from a vector
     pub fn new(inner: Vec<PhysicalSortExpr>) -> Self {
@@ -358,7 +344,8 @@ impl LexOrdering {
 
     /// Return an empty LexOrdering (no expressions)
     pub fn empty() -> &'static LexOrdering {
-        EMPTY_ORDER.get_or_init(LexOrdering::default)
+        static EMPTY_ORDER: LazyLock<LexOrdering> = LazyLock::new(LexOrdering::default);
+        &EMPTY_ORDER
     }
 
     pub fn capacity(&self) -> usize {
@@ -416,8 +403,8 @@ impl LexOrdering {
     /// This function converts `PhysicalSortRequirement` to `PhysicalSortExpr`
     /// for each entry in the input. If required ordering is None for an entry
     /// default ordering `ASC, NULLS LAST` if given (see the `PhysicalSortExpr::from`).
-    pub fn from_lex_requirement(requirements: LexRequirement) -> LexOrdering {
-        requirements
+    pub fn from_lex_requirement(requirement: LexRequirement) -> LexOrdering {
+        requirement
             .into_iter()
             .map(PhysicalSortExpr::from)
             .collect()
@@ -541,15 +528,10 @@ impl LexRequirement {
         self.inner.push(physical_sort_requirement)
     }
 
-    /// Create a new [`LexRequirement`] from a vector of [`PhysicalSortExpr`]s.
+    /// Create a new [`LexRequirement`] from a [`LexOrdering`]
     ///
-    /// Returns [`PhysicalSortRequirement`] that requires the exact
+    /// Returns [`LexRequirement`] that requires the exact
     /// sort of the [`PhysicalSortExpr`]s in `ordering`
-    ///
-    /// This method takes `&'a PhysicalSortExpr` to make it easy to
-    /// use implementing [`ExecutionPlan::required_input_ordering`].
-    ///
-    /// [`ExecutionPlan::required_input_ordering`]: https://docs.rs/datafusion/latest/datafusion/physical_plan/trait.ExecutionPlan.html#method.required_input_ordering
     pub fn from_lex_ordering(ordering: LexOrdering) -> Self {
         Self::new(
             ordering
