@@ -78,21 +78,53 @@ version = "45.0.0"
 ahash = { version = "0.8", default-features = false, features = [
     "runtime-rng",
 ] }
-arrow = { version = "54.1.0", features = [
+
+#arrow = { path="../arrow-rs/arrow", features = [
+#    "prettyprint",
+#] }
+#arrow-array = { path="../arrow-rs/arrow-array", default-features = false, features = [
+#    "chrono-tz",
+#] }
+#arrow-buffer = { path="../arrow-rs/arrow-buffer", default-features = false }
+#arrow-flight = { path="../arrow-rs/arrow-flight", features = [
+#    "flight-sql-experimental",
+#] }
+#arrow-ipc = { path="../arrow-rs/arrow-ipc", default-features = false, features = [
+#    "lz4",
+#] }
+#arrow-ord = { path="../arrow-rs/arrow-ord",  default-features = false }
+#arrow-schema = { path="../arrow-rs/arrow-schema",  default-features = false }
+#arrow-string = { path="../arrow-rs/arrow-string",  default-features = false }
+#object_store = { path="../arrow-rs/object_store", default-features = false }
+#parquet = { path="../arrow-rs/parquet", default-features = false, features = [
+#    "arrow",
+#    "async",
+#    "object_store",
+#] }
+
+arrow = { git="https://github.com/Nekit2217/arrow-rs", branch="bm-master", features = [
     "prettyprint",
 ] }
-arrow-array = { version = "54.1.0", default-features = false, features = [
+arrow-array = { git="https://github.com/Nekit2217/arrow-rs", branch="bm-master", default-features = false, features = [
     "chrono-tz",
 ] }
-arrow-buffer = { version = "54.1.0", default-features = false }
-arrow-flight = { version = "54.1.0", features = [
+arrow-buffer = { git="https://github.com/Nekit2217/arrow-rs", branch="bm-master", default-features = false }
+arrow-flight = { git="https://github.com/Nekit2217/arrow-rs", branch="bm-master", features = [
     "flight-sql-experimental",
 ] }
-arrow-ipc = { version = "54.1.0", default-features = false, features = [
+arrow-ipc = { git="https://github.com/Nekit2217/arrow-rs", branch="bm-master", default-features = false, features = [
     "lz4",
 ] }
-arrow-ord = { version = "54.1.0", default-features = false }
-arrow-schema = { version = "54.1.0", default-features = false }
+arrow-ord = { git="https://github.com/Nekit2217/arrow-rs", branch="bm-master",  default-features = false }
+arrow-schema = { git="https://github.com/Nekit2217/arrow-rs", branch="bm-master",  default-features = false }
+object_store = { git="https://github.com/Nekit2217/arrow-rs", branch="bm-master", default-features = false }
+parquet = { git="https://github.com/Nekit2217/arrow-rs", branch="bm-master", default-features = false, features = [
+    "arrow",
+    "async",
+    "object_store",
+] }
+
+
 async-trait = "0.1.73"
 bigdecimal = "0.4.7"
 bytes = "1.10"
@@ -133,13 +165,7 @@ hashbrown = { version = "0.14.5", features = ["raw"] }
 indexmap = "2.7.1"
 itertools = "0.14"
 log = "^0.4"
-object_store = { version = "0.11.0", default-features = false }
 parking_lot = "0.12"
-parquet = { version = "54.1.0", default-features = false, features = [
-    "arrow",
-    "async",
-    "object_store",
-] }
 pbjson = { version = "0.7.0" }
 pbjson-types = "0.7"
 # Should match arrow-flight's version of prost.
